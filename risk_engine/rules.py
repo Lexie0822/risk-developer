@@ -45,7 +45,6 @@ class VolumeLimitRule(BaseRule):
         self.dimension = dimension
         self.context = context
         self.reset_daily = reset_daily
-        self.counters = MultiDimCounter
         self.counters = MultiDimCounter()
         self.suspended_keys: set[Key] = set()
         self._last_reset_day: Optional[int] = None
