@@ -57,6 +57,7 @@ engine.restore(snap)
 ### 单元测试与基准
 ```bash
 python3 -m unittest tests/test_rules.py -v
+python3 -m unittest tests/test_rules_product.py -v
 python3 -m examples.benchmark
 ```
 
@@ -76,10 +77,23 @@ python3 -m examples.mp_shard
 - 统一 `Action` 输出，便于下游撮合/交易系统接入。
 - 零依赖、可直接在标准 Python 环境运行。
 
-### 局限
-- 演示版本为单进程内存态，不具备持久化与分布式一致性保障。
-- 未实现真正的微秒级响应与百万级 QPS；需要配合多进程分片/异步 IO/更底层语言优化。
-- 未实现风控状态持久化与跨日自动重置（可在生产中通过定时器/数据库实现）。
+### 局限与面试答辩要点
+- 当前是单进程内存态，不具备持久化与分布式一致性。这在面试场景是合理的“演示版”权衡，用于突出核心抽象与正确性。
+- 未实现微秒级响应与百万级 QPS。演示关注架构可扩展性与可验证性，性能可通过下述路径演进：
+  - 进程级分片（已提供 `examples/mp_shard.py`），按 `account_id`/`client_id` 一致性哈希，横向扩容 N 倍；
+  - 异步 IO/批处理：合并多条事件一次处理，减少函数/结构体分配；
+  - 热路径下沉：将规则核⼼计数迁移到 C/Rust（Cython、pyo3），实现无锁 ring-buffer；
+  - CPU 亲和/NUMA 绑定与 pin 线程，减少调度抖动；
+  - 序列化零拷贝（共享内存/`mmap`/`pyarrow Plasma`）对接撮合与行情。
+- 状态持久化与跨日：
+  - 将 `snapshot()` 输出写入 Redis/RocksDB，并在进程启动时 `restore()`；
+  - 通过定时器或由撮合的“交易日切换”事件驱动跨日重置；
+  - 引入版本化阈值配置，支持灰度与回滚。
+- 可靠性：
+  - 引入断路器与幂等处置（`Action` 去重、有效期 `until_ns`）；
+  - 通过审计日志（append-only）保证可追溯。
+
+> 面试沟通建议：先展示规则抽象、状态与多维统计的可扩展性，再讲清楚“如何演进到生产级”的路线图，结合示例代码（分片、基准、快照）即可充分覆盖考点。
 
 ### 目录
 - `risk_engine/models.py`：订单、成交、方向、产品解析
@@ -91,3 +105,4 @@ python3 -m examples.mp_shard
 - `examples/benchmark.py`：基准脚本
 - `examples/mp_shard.py`：多进程分片示例
 - `tests/test_rules.py`：最小化单元测试集
+- `tests/test_rules_product.py`：产品维度单测
