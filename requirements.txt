@@ -1,1 +1,1 @@
-# No third-party dependencies are required for this demo engine.
+# 最小依赖（当前实现仅使用标准库，无需第三方依赖）
