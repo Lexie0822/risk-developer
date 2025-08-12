@@ -33,7 +33,7 @@ def run_bench(num_events: int = 200_000):
         ts = base_ts
         engine.on_order(Order(i+1, "ACC_001", "T2303", Direction.BID, 100.0, 1, ts))
         if (i % 4) == 0:
-            engine.on_trade(Trade(i+1, i+1, "ACC_001", "T2303", 100.0, 1, ts))
+            engine.on_trade(Trade(tid=i+1, oid=i+1, account_id="ACC_001", contract_id="T2303", price=100.0, volume=1, timestamp=ts))
     t1 = time.perf_counter()
     dt = t1 - t0
     print(f"Processed {num_events} orders + {num_events//4} trades in {dt:.3f}s => {(num_events+num_events//4)/dt:.0f} evt/s")
