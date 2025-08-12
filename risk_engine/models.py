@@ -1,16 +1,14 @@
 from __future__ import annotations
-
+import enum
 from dataclasses import dataclass
-from enum import Enum
-from typing import Optional
 
 
-class Direction(str, Enum):
-    BID = "Bid"
-    ASK = "Ask"
+class Direction(enum.IntEnum):
+    BID = 1
+    ASK = 2
 
 
-@dataclass(slots=True)
+@dataclass(slots=True, frozen=True)
 class Order:
     oid: int
     account_id: str
@@ -18,16 +16,16 @@ class Order:
     direction: Direction
     price: float
     volume: int
-    timestamp: int  # nanoseconds since epoch
+    timestamp: int  # ns
 
 
-@dataclass(slots=True)
+@dataclass(slots=True, frozen=True)
 class Trade:
     tid: int
     oid: int
     price: float
     volume: int
-    timestamp: int  # nanoseconds since epoch
+    timestamp: int  # ns
 
 
 @dataclass(slots=True)

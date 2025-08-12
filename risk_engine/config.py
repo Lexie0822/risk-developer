@@ -1,33 +1,42 @@
 from __future__ import annotations
-
+import enum
 from dataclasses import dataclass, field
-from typing import Dict, Optional
+from typing import Dict, Optional, Sequence, Mapping
 
-from .stats import StatsDimension
+
+class Dimension(enum.IntEnum):
+    ACCOUNT = 1
+    CONTRACT = 2
+    PRODUCT = 3
+    ACCOUNT_CONTRACT = 4
+    ACCOUNT_PRODUCT = 5
+
+
+class VolumeMetric(enum.IntEnum):
+    TRADE_VOLUME = 1
+    TRADE_AMOUNT = 2
 
 
 @dataclass(slots=True)
 class VolumeLimitRuleConfig:
-    threshold: int = 1000  # e.g. 1000 lots per day
-    dimension: StatsDimension = StatsDimension.ACCOUNT
-    metric: str = "trade_volume"  # kept for extensibility
-    reset_daily: bool = True  # if True, reset counters at UTC day boundaries
+    metric: VolumeMetric = VolumeMetric.TRADE_VOLUME
+    threshold: int = 1000
+    dimension: Dimension = Dimension.ACCOUNT
+    actions: Sequence[int] = (1,)  # default SUSPEND_ACCOUNT_TRADING
 
 
 @dataclass(slots=True)
 class OrderRateLimitRuleConfig:
-    threshold: int = 50  # e.g. 50 orders per window
-    window_ns: int = 1_000_000_000  # 1 second by default
-    dimension: StatsDimension = StatsDimension.ACCOUNT
+    threshold_per_window: int = 50
+    window_ns: int = 1_000_000_000  # 1s
+    bucket_ns: int = 10_000_000  # 10ms
+    auto_resume: bool = True
+    actions_on_exceed: Sequence[int] = (2,)  # default SUSPEND_ACCOUNT_ORDERING
+    actions_on_resume: Sequence[int] = (4,)  # RESUME_ACCOUNT_ORDERING
 
 
 @dataclass(slots=True)
-class RiskEngineConfig:
-    volume_limit: Optional[VolumeLimitRuleConfig] = field(
-        default_factory=VolumeLimitRuleConfig
-    )
-    order_rate_limit: Optional[OrderRateLimitRuleConfig] = field(
-        default_factory=OrderRateLimitRuleConfig
-    )
-    # contract_id -> product_id mapping for product dimension support
-    contract_to_product: Dict[str, str] = field(default_factory=dict)
+class EngineConfig:
+    product_mapping: Mapping[str, str] = field(default_factory=dict)
+    volume_limit: Optional[VolumeLimitRuleConfig] = field(default_factory=VolumeLimitRuleConfig)
+    order_rate_limit: Optional[OrderRateLimitRuleConfig] = field(default_factory=OrderRateLimitRuleConfig)

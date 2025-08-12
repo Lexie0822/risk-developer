@@ -1,35 +1,21 @@
 from __future__ import annotations
-
-from dataclasses import dataclass, field
-from enum import Enum
-from typing import Any, Optional
-
-
-class ActionType(str, Enum):
-    SUSPEND_ACCOUNT_TRADING = "SUSPEND_ACCOUNT_TRADING"
-    RESUME_ACCOUNT_TRADING = "RESUME_ACCOUNT_TRADING"
-    SUSPEND_ORDERING = "SUSPEND_ORDERING"
-    RESUME_ORDERING = "RESUME_ORDERING"
-    BLOCK_ORDER = "BLOCK_ORDER"
-    ALERT = "ALERT"
+import enum
+from dataclasses import dataclass
+from typing import Any, Mapping, Optional
 
 
-@dataclass(slots=True)
-class Action:
+class ActionType(enum.IntEnum):
+    SUSPEND_ACCOUNT_TRADING = 1
+    SUSPEND_ACCOUNT_ORDERING = 2
+    RESUME_ACCOUNT_TRADING = 3
+    RESUME_ACCOUNT_ORDERING = 4
+    ALERT = 5
+
+
+@dataclass(frozen=True, slots=True)
+class ActionEvent:
     type: ActionType
     account_id: str
+    timestamp: int
     reason: str
-    until_ns: Optional[int] = None
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-    def short(self) -> str:
-        fields = {
-            "type": self.type.value,
-            "account": self.account_id,
-            "reason": self.reason,
-        }
-        if self.until_ns is not None:
-            fields["until_ns"] = self.until_ns
-        if self.metadata:
-            fields["meta"] = self.metadata
-        return str(fields)
+    extra: Optional[Mapping[str, Any]] = None
