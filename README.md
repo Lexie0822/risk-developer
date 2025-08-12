@@ -8,12 +8,13 @@
   - 报单频率控制：滑动时间窗统计下的报单次数，超过阈值触发 `SUSPEND_ORDERING`，恢复后触发 `RESUME_ORDERING`。
 - **多维统计**：可按 `account`、`contract`、`product` 维度统计（通过 `contract_to_product` 提供映射）。
 - **扩展性**：规则、统计维度与阈值均为配置化；`Action` 为统一输出载体。
+- **运维接口**：支持阈值/窗口的热更新；成交量规则支持按日自动重置与状态快照/恢复。
 
 ### 安装与运行
 无需第三方依赖（Python 3.10+）。
 
 ```bash
-python -m examples.simulate
+python3 -m examples.simulate
 ```
 
 可见示例输出两类规则的处置结果。
@@ -42,6 +43,28 @@ engine.ingest_trade(Trade(...))
 - `OrderRateLimitRuleConfig`：`threshold`（窗口最大报单数），`window_ns`（窗口长度，纳秒），`dimension`。
 - `RiskEngineConfig.contract_to_product`：`contract_id -> product_id` 映射，用于产品维度统计。
 
+### 热更新与快照
+```python
+# 热更新
+engine.update_order_rate_limit(threshold=100, window_ns=500_000_000)
+engine.update_volume_limit(threshold=10_000, reset_daily=False)
+
+# 快照/恢复（简易持久化）
+snap = engine.snapshot()
+engine.restore(snap)
+```
+
+### 单元测试与基准
+```bash
+python3 -m unittest tests/test_rules.py -v
+python3 -m examples.benchmark
+```
+
+### 多进程分片示例
+```bash
+python3 -m examples.mp_shard
+```
+
 ### 设计要点（高并发/低延迟）
 - 数据模型采用 `dataclass(slots=True)` 减少对象开销。
 - 频控使用无锁 `deque` 实现滑动时间窗；只在当前 key 上清理过期事件，时间复杂度均摊 O(1)。
@@ -65,3 +88,6 @@ engine.ingest_trade(Trade(...))
 - `risk_engine/rules.py`：风控规则实现
 - `risk_engine/engine.py`：引擎装配与消息入口
 - `examples/simulate.py`：示例脚本
+- `examples/benchmark.py`：基准脚本
+- `examples/mp_shard.py`：多进程分片示例
+- `tests/test_rules.py`：最小化单元测试集
