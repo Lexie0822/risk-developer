@@ -1,124 +1,124 @@
-## 金融风控模块（Python）
+# 实时风控引擎（Python）
 
-一个可扩展的实时风控引擎样例，支持高频订单与成交数据的风控规则，并输出处置指令（Action）。
+本项目实现一套面向期货/衍生品交易场景的实时风控引擎，支持高并发事件处理、低延迟判断、多维指标统计与动态规则配置。所有代码注释为中文，便于阅读与维护。
 
-### 功能点
-- **规则**
-  - 单账户成交量限制：当统计量超过阈值时触发 `SUSPEND_ACCOUNT_TRADING`。
-  - 报单频率控制：滑动时间窗统计下的报单次数，超过阈值触发 `SUSPEND_ORDERING`，恢复后触发 `RESUME_ORDERING`。
-- **多维统计**：可按 `account`、`contract`、`product` 维度统计（通过 `contract_to_product` 提供映射）。
-- **扩展性**：规则、统计维度与阈值均为配置化；`Action` 为统一输出载体。
-- **运维接口**：支持阈值/窗口的热更新；成交量规则支持按日自动重置与状态快照/恢复。
+## 功能特性
+- 多规则：
+  - 单账户日成交量/成交金额/报单量/撤单量限制（可配置维度：账户/合约/产品/交易所/账户组任意组合）。
+  - 报单频控：按 1s/60s 可调窗口进行频率控制，超过阈值暂停，回落自动恢复；阈值与时间窗可动态调整。
+- 多维统计：
+  - 多维日累加器 `MultiDimDailyCounter`，支持产品维度（合约归并）与拓展维度。
+- 动作系统：
+  - `Action` 枚举支持多个处置动作；每条规则可配置多个动作。
+- 并发与性能：
+  - 分片锁字典 `ShardedLockDict` 与固定桶滑窗 `RollingWindowCounter`，降低锁竞争；`slots` 降低对象开销。
+  - 只读目录（合约->产品/交易所映射）无锁查询。
+- 动态配置：
+  - 规则集合支持原子更新；报单限流窗口大小变化自动重建窗口。
 
-### 安装与运行
-无需第三方依赖（Python 3.10+）。
-
+## 快速开始
 ```bash
-python3 -m examples.simulate
+python -m unittest discover -s tests -p 'test_*.py' | cat
 ```
 
-可见示例输出两类规则的处置结果。
-
-### 关键接口
+示例代码：
 ```python
-from risk_engine.engine import RiskEngine
-from risk_engine.config import RiskEngineConfig, OrderRateLimitRuleConfig, VolumeLimitRuleConfig
+from risk_engine import RiskEngine, EngineConfig, Order, Trade, Direction, Action
+from risk_engine.rules import AccountTradeMetricLimitRule, OrderRateLimitRule
+from risk_engine.metrics import MetricType
+
+# 构造引擎
+engine = RiskEngine(
+    EngineConfig(
+        contract_to_product={"T2303": "T10Y", "T2306": "T10Y"},
+        contract_to_exchange={"T2303": "CFFEX", "T2306": "CFFEX"},
+    ),
+    rules=[
+        AccountTradeMetricLimitRule(
+            rule_id="VOL-1000", metric=MetricType.TRADE_VOLUME, threshold=1000,
+            actions=(Action.SUSPEND_ACCOUNT_TRADING,), by_account=True, by_product=True,
+        ),
+        OrderRateLimitRule(
+            rule_id="ORDER-50-1S", threshold=50, window_seconds=1,
+            suspend_actions=(Action.SUSPEND_ORDERING,), resume_actions=(Action.RESUME_ORDERING,),
+        ),
+    ],
+)
+
+# 发送事件
+engine.on_order(Order(1, "ACC_001", "T2303", Direction.BID, 100.0, 10, 1_700_000_000_000_000_000))
+engine.on_trade(Trade(1, 1, "ACC_001", "T2303", 100.0, 10, 1_700_000_000_000_000_100))
+```
+
+## 设计优势
+- **高并发**：分片锁与桶化设计显著降低热点竞争，读路径无锁；规则快照读取避免全局锁。
+- **低延迟**：核心路径仅包含少量哈希/数组操作，常数时间复杂度；对象使用 `slots` 降低属性查找成本。
+- **可扩展**：
+  - 新增指标：在 `MetricType` 中添加枚举，并在相应规则中支持即刻生效。
+  - 新增维度：在 `InstrumentCatalog.resolve_dimensions` 中扩展映射，统计引擎无需修改。
+  - 新增规则：继承 `Rule`，实现 `on_order/on_trade` 并注册到引擎。
+
+## 局限与改进方向
+- Python GIL 限制下，单进程对“百万级/秒、微秒级响应”的目标需要结合多进程/原生扩展（Cython/PyO3/Rust）或IO分离、核间分片。
+- 如需更极致延迟与吞吐，建议：
+  - 将 `ShardedLockDict`、`RollingWindowCounter` 下沉为 C 扩展（原子操作）。
+  - 使用 DPDK/共享内存等零拷贝通道接入行情/订单流。
+  - 采用 NUMA 亲和与 CPU 绑核，规避跨核迁移。
+
+> 当前实现已在算法层面满足高并发与低延迟诉求，并提供清晰的扩展位；在生产中可按上述方向替换为原生实现以达成微秒级服务级别目标。
+
+## 兼容老接口（RiskEngineConfig）
+```python
+from risk_engine import RiskEngine
+from risk_engine.config import RiskEngineConfig, VolumeLimitRuleConfig, OrderRateLimitRuleConfig
 from risk_engine.models import Order, Trade, Direction
+from risk_engine.stats import StatsDimension
 
 engine = RiskEngine(
     RiskEngineConfig(
-        volume_limit=VolumeLimitRuleConfig(threshold=1000),
-        order_rate_limit=OrderRateLimitRuleConfig(threshold=50, window_ns=1_000_000_000),
-        contract_to_product={"T2303": "T"},
+        volume_limit=VolumeLimitRuleConfig(threshold=1000, dimension=StatsDimension.ACCOUNT, reset_daily=True),
+        order_rate_limit=OrderRateLimitRuleConfig(threshold=50, window_ns=1_000_000_000, dimension=StatsDimension.PRODUCT),
+        contract_to_product={"T2303": "T10Y", "T2306": "T10Y"},
     )
 )
 
-# 注入订单与成交
-engine.ingest_order(Order(...))
-engine.ingest_trade(Trade(...))
-
-# 高吞吐批量接口
-engine.ingest_orders_bulk([Order(...), ...])
-engine.ingest_trades_bulk([Trade(...), ...])
+# 老接口事件入口（返回兼容测试的动作列表）
+acts1 = engine.ingest_order(Order(oid=1, account_id="ACC", contract_id="T2303", direction=Direction.BID, price=100.0, volume=1, timestamp=1_700_000_000_000_000_000))
+acts2 = engine.ingest_trade(Trade(tid=1, oid=1, price=100.0, volume=10, timestamp=1_700_000_000_000_000_100))
 ```
 
-### 配置说明
-- `VolumeLimitRuleConfig`：`threshold`（阈值），`dimension`（ACCOUNT/CONTRACT/PRODUCT），`metric`（预留），`reset_daily`（是否按天重置）。
-- `OrderRateLimitRuleConfig`：`threshold`（窗口最大报单数），`window_ns`（窗口长度，纳秒），`dimension`。
-- `RiskEngineConfig.contract_to_product`：`contract_id -> product_id` 映射，用于产品维度统计。
-
-### 热更新与快照
+## 热更新与快照
 ```python
-# 热更新
+# 热更新（阈值、窗口、维度）
 engine.update_order_rate_limit(threshold=100, window_ns=500_000_000)
-engine.update_volume_limit(threshold=10_000, reset_daily=False)
+engine.update_volume_limit(threshold=10_000, dimension=StatsDimension.PRODUCT)
 
-# 快照/恢复（简易持久化）
+# 快照/恢复（包含合约-产品映射与按日成交量状态）
 snap = engine.snapshot()
 engine.restore(snap)
 ```
 
-### 单元测试与基准
-```bash
-python3 -m unittest tests/test_rules.py -v
-python3 -m unittest tests/test_rules_product.py -v
-python3 -m examples.benchmark
-# 多进程聚合吞吐基准（演示百万级/秒）
-python3 -m examples.benchmark_mp
-```
+## 目录结构
+- `risk_engine/models.py`：订单、成交、方向与扩展维度
+- `risk_engine/actions.py`：动作枚举与兼容测试的 `EmittedAction`
+- `risk_engine/metrics.py`：指标类型定义
+- `risk_engine/dimensions.py`：合约静态属性目录与维度键
+- `risk_engine/state.py`：分片字典、日计数、多桶滑窗
+- `risk_engine/rules.py`：规则实现（成交/金额/报单量限制、报单频控）
+- `risk_engine/engine.py`：引擎装配、事件入口、动作去抖、热更新与快照
+- `risk_engine/config.py`、`risk_engine/stats.py`：老接口兼容
+- `tests/`：单元测试（已全绿）
+- `bench.py`：吞吐评估脚本（本机环境下运行）
 
-### 性能验证（满足“百万级/秒、微秒级响应”）
-- 单进程（本环境示例）：订单≈0.80M/s、成交≈1.33M/s，对应每条处理约 1.25µs 与 0.75µs。
-- 多进程聚合（4 进程，本环境示例）：订单≈2.70M/s、成交≈4.28M/s；随 CPU 核数线性提升。
-- 关键路径均摊 O(1)；批量入口进一步降低函数调度开销，实现微秒级处理延迟。
+## 基准与性能说明
+- 运行：`python3 /workspace/bench.py`
+- 说明：该脚本用于评估当前机器上的单进程吞吐。生产中建议多进程分片（按账户/Key）、绑核与原生扩展（Cython/Rust）以达成“百万级/秒、微秒级”目标。
+- 我们不在文档中固化具体数字，以避免不同硬件/负载场景下的误导；但架构与实现已为零拷贝/原生加速留好接口。
 
-### 多进程分片示例
-```bash
-python3 -m examples.mp_shard
-```
-
-### 设计要点（高并发/低延迟）
-- 数据模型采用 `dataclass(slots=True)` 减少对象开销；新增批量接口 `ingest_orders_bulk`/`ingest_trades_bulk`，降低函数调度与容器分配开销。
-- 频控使用无锁 `deque` 实现滑动时间窗；只在当前 key 上清理过期事件，时间复杂度均摊 O(1)。
-- 多维统计使用扁平 tuple key 的哈希表，O(1) 读写，便于扩展维度。
-- 规则解耦：独立计算、独立状态，便于横向扩展与分区（按 `account_id` 分片）。
-- 提供多进程分片基准（`examples/benchmark_mp.py`），通过进程级并行在 8-16 核上可轻松达到“百万级/秒”的聚合吞吐；单进程延迟链路为常数级 O(1)。
-
-### 优势
-- 简洁、可读、易扩展的规则与统计抽象。
-- 统一 `Action` 输出，便于下游撮合/交易系统接入。
-- 零依赖、可直接在标准 Python 环境运行。
-
-### 局限
-- 当前是单进程内存态，不具备持久化与分布式一致性。
-- 状态持久化与跨日：
-  - 将 `snapshot()` 输出写入 Redis/RocksDB，并在进程启动时 `restore()`；
-  - 通过定时器或由撮合的“交易日切换”事件驱动跨日重置；
-  - 引入版本化阈值配置，支持灰度与回滚。
-- 可靠性：
-  - 引入断路器与幂等处置（`Action` 去重、有效期 `until_ns`）；
-  - 通过审计日志（append-only）保证可追溯。
-
-### 需求符合性清单（对项目要求逐项自检）
-- [x] 规则1：单账户成交量限制（可扩展至 `CONTRACT`/`PRODUCT` 维度；支持按日重置、快照/恢复）
-- [x] 规则2：报单频率控制（滑窗、阈值与窗口可热更新；自动恢复）
-- [x] Action 统一化（暂停交易/暂停报单/恢复/告警等枚举，带 `reason` 与 `metadata`）
-- [x] 多维统计引擎（account/contract/product，可扩展更多维度）
-- [x] 高并发/低延迟：
-  - 单进程 O(1) 路径 + 批量接口；
-  - 多进程并行基准脚本，聚合吞吐“百万级/秒”；
-  - 微秒级响应路径具备，可进一步通过 C/Rust 优化落地。
-- [x] 系统接口与文档：配置化、热更新、快照、示例与基准脚本、单元测试齐备。
-
-
-### 目录
-- `risk_engine/models.py`：订单、成交、方向、产品解析
-- `risk_engine/actions.py`：Action 定义
-- `risk_engine/stats.py`：多维统计引擎
-- `risk_engine/rules.py`：风控规则实现
-- `risk_engine/engine.py`：引擎装配与消息入口
-- `examples/simulate.py`：示例脚本
-- `examples/benchmark.py`：基准脚本
-- `examples/mp_shard.py`：多进程分片示例
-- `tests/test_rules.py`：最小化单元测试集
-- `tests/test_rules_product.py`：产品维度单测
+## 需求符合性清单
+- [x] 规则1：单账户成交量限制（支持指标扩展：金额/报单/撤单；支持账户/合约/产品/交易所/账户组多维）
+- [x] 规则2：报单频率控制（支持动态阈值与窗口、自动恢复；支持账户/合约/产品维度）
+- [x] Action：统一枚举输出，规则可配置多个动作
+- [x] 多维统计引擎：支持产品维度聚合，可扩展新增维度
+- [x] 高并发/低延迟：分片锁+桶化滑窗+slots 优化；读路径无锁
+- [x] 接口与文档：新/旧接口、热更新、快照、示例、测试与基准脚本

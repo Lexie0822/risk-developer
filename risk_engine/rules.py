@@ -1,222 +1,184 @@
 from __future__ import annotations
 
-from collections import deque, defaultdict
-from dataclasses import dataclass
-from typing import Deque, Dict, Iterable, List, Optional, Tuple
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Sequence, Tuple, Mapping
 
-from .actions import Action, ActionType
-from .models import Order, Trade, ProductResolver
-from .stats import MultiDimCounter, StatsDimension
-
-
-Key = Tuple[str, ...]
-NS_PER_DAY = 86_400_000_000_000
+from .actions import Action
+from .metrics import MetricType
+from .dimensions import InstrumentCatalog, make_dimension_key
+from .state import MultiDimDailyCounter, RollingWindowCounter
+from .models import Order, Trade
+from .state import _ns_to_day_id
 
 
 @dataclass(slots=True)
 class RuleContext:
-    product_resolver: ProductResolver
+    """规则运行上下文：提供目录、统计状态等访问入口。"""
+
+    catalog: InstrumentCatalog
+    daily_counter: MultiDimDailyCounter
+    order_rate_windows: Dict[str, RollingWindowCounter]  # rule_id -> counter
+    # 兼容：旧版成交量规则的外部状态（按日、按维度累加）
+    legacy_volume_state: Optional[Dict[Tuple[int, Tuple[str, ...]], float]] = None
 
 
-class BaseRule:
-    def process_order(self, order: Order) -> List[Action]:
-        return []
-
-    def process_trade(self, trade: Trade, related_order: Optional[Order]) -> List[Action]:
-        return []
+@dataclass(slots=True)
+class RuleResult:
+    actions: List[Action]
+    reasons: List[str]
 
 
-class VolumeLimitRule(BaseRule):
-    """Suspend trading for an account if traded volume exceeds threshold.
+class Rule:
+    """规则基类。"""
 
-    Supports dimensions ACCOUNT, CONTRACT, PRODUCT. Counting happens on trades
-    because they represent executed risk.
+    rule_id: str
+
+    def on_order(self, ctx: RuleContext, order: Order) -> Optional[RuleResult]:
+        return None
+
+    def on_trade(self, ctx: RuleContext, trade: Trade) -> Optional[RuleResult]:
+        return None
+
+
+@dataclass(slots=True)
+class AccountTradeMetricLimitRule(Rule):
+    """账户维度-按日指标阈值限制规则。
+
+    - 支持多指标：成交量/成交金额/报单量/撤单量（报单量计数可在 on_order 中累加）。
+    - 支持多维：账户、合约、产品、交易所、账户组任意组合。
+    - 触发后可配置多个 Action。
     """
 
-    def __init__(
-        self,
-        threshold: int,
-        dimension: StatsDimension,
-        context: RuleContext,
-        *,
-        reset_daily: bool = True,
-    ) -> None:
-        self.threshold = threshold
-        self.dimension = dimension
-        self.context = context
-        self.reset_daily = reset_daily
-        self.counters = MultiDimCounter()
-        self.suspended_keys: set[Key] = set()
-        self._last_reset_day: Optional[int] = None
+    rule_id: str
+    metric: MetricType
+    threshold: float
+    actions: Tuple[Action, ...] = (Action.SUSPEND_ACCOUNT_TRADING,)
+    # 统计维度开关：True 表示计入维度
+    by_account: bool = True
+    by_contract: bool = False
+    by_product: bool = True
+    by_exchange: bool = False
+    by_account_group: bool = False
 
-    def _make_key(self, order: Optional[Order], trade: Trade) -> Key:
-        # Try to use information from order if provided (for account_id, contract)
-        if order is None:
-            # Without order context, we cannot know account or contract safely.
-            # In real systems, trade carries them; here we fallback to empty key.
-            return ("unknown",)
-        account_id = order.account_id
-        if self.dimension == StatsDimension.ACCOUNT:
-            return (account_id,)
-        if self.dimension == StatsDimension.CONTRACT:
-            return (account_id, order.contract_id)
-        if self.dimension == StatsDimension.PRODUCT:
-            product_id = self.context.product_resolver.resolve_product(order.contract_id) or "unknown"
-            return (account_id, product_id)
-        return (account_id,)
+    def _make_key_for_order(self, ctx: RuleContext, order: Order):
+        product_id = None
+        if self.by_product:
+            product_id = ctx.catalog.contract_to_product.get(order.contract_id)
+        # 仅当 by_contract=True 才纳入 contract_id
+        return make_dimension_key(
+            account_id=order.account_id if self.by_account else None,
+            contract_id=order.contract_id if self.by_contract else None,
+            product_id=product_id,
+            exchange_id=order.exchange_id if self.by_exchange else None,
+            account_group_id=order.account_group_id if self.by_account_group else None,
+        )
 
-    def _maybe_daily_reset(self, now_ns: int) -> None:
-        if not self.reset_daily:
-            return
-        current_day = now_ns // NS_PER_DAY
-        if self._last_reset_day is None:
-            self._last_reset_day = current_day
-            return
-        if current_day != self._last_reset_day:
-            # New UTC day: reset counters and suspensions
-            self.counters = MultiDimCounter()
-            self.suspended_keys.clear()
-            self._last_reset_day = current_day
+    def _make_key_for_trade(self, ctx: RuleContext, trade: Trade):
+        product_id = None
+        if self.by_product and trade.contract_id is not None:
+            product_id = ctx.catalog.contract_to_product.get(trade.contract_id)
+        return make_dimension_key(
+            account_id=trade.account_id if self.by_account else None,
+            contract_id=trade.contract_id if self.by_contract else None,
+            product_id=product_id,
+            exchange_id=trade.exchange_id if self.by_exchange else None,
+            account_group_id=trade.account_group_id if self.by_account_group else None,
+        )
 
-    def process_trade(self, trade: Trade, related_order: Optional[Order]) -> List[Action]:
-        actions: List[Action] = []
-        self._maybe_daily_reset(trade.timestamp)
-        key = self._make_key(related_order, trade)
-        new_value = self.counters.add(key, trade.volume)
-        if new_value > self.threshold and key not in self.suspended_keys:
-            self.suspended_keys.add(key)
-            account_id = related_order.account_id if related_order else "unknown"
-            actions.append(
-                Action(
-                    type=ActionType.SUSPEND_ACCOUNT_TRADING,
-                    account_id=account_id,
-                    reason=f"Volume limit exceeded: {new_value} > {self.threshold} on {self.dimension.value}",
-                    metadata={"key": key},
-                )
+    def on_order(self, ctx: RuleContext, order: Order) -> Optional[RuleResult]:
+        # 若监控报单量，则累加并判断
+        if self.metric == MetricType.ORDER_COUNT:
+            key = self._make_key_for_order(ctx, order)
+            new_value = ctx.daily_counter.add(key, MetricType.ORDER_COUNT, 1.0, order.timestamp)
+            if new_value >= self.threshold:
+                return RuleResult(actions=list(self.actions), reasons=[
+                    f"订单计数达到阈值: {new_value} >= {self.threshold}",
+                ])
+        return None
+
+    def on_trade(self, ctx: RuleContext, trade: Trade) -> Optional[RuleResult]:
+        # 计算指标增量
+        if self.metric == MetricType.TRADE_VOLUME:
+            value = float(trade.volume)
+        elif self.metric == MetricType.TRADE_NOTIONAL:
+            value = float(trade.volume) * float(trade.price)
+        else:
+            return None
+
+        # 兼容路径：如果提供 legacy_volume_state，按其规则计数
+        if ctx.legacy_volume_state is not None and self.rule_id == "LEGACY-VOLUME":
+            # 使用维度开关构造 legacy key（不包含 contract，除非 by_contract=True）
+            product_id = None
+            if self.by_product and trade.contract_id is not None:
+                product_id = ctx.catalog.contract_to_product.get(trade.contract_id)
+            legacy_key = make_dimension_key(
+                account_id=trade.account_id if self.by_account else None,
+                contract_id=trade.contract_id if self.by_contract else None,
+                product_id=product_id,
             )
-        return actions
+            day_id = _ns_to_day_id(trade.timestamp)
+            comp = (day_id, legacy_key)
+            current = ctx.legacy_volume_state.get(comp, 0.0)
+            new_value = current + value
+            ctx.legacy_volume_state[comp] = new_value
+        else:
+            # 正常路径：多维日累加器
+            key = self._make_key_for_trade(ctx, trade)
+            new_value = ctx.daily_counter.add(key, self.metric, value, trade.timestamp)
 
-    # Hot update and persistence helpers
-    def update_config(
-        self,
-        *,
-        threshold: Optional[int] = None,
-        dimension: Optional[StatsDimension] = None,
-        reset_daily: Optional[bool] = None,
-    ) -> None:
-        if threshold is not None:
-            self.threshold = threshold
-        if dimension is not None:
-            self.dimension = dimension
-        if reset_daily is not None:
-            self.reset_daily = reset_daily
-
-    def snapshot_state(self) -> dict:
-        return {
-            "threshold": self.threshold,
-            "dimension": self.dimension.value,
-            "reset_daily": self.reset_daily,
-            "counters": list((list(k), v) for k, v in self.counters.items()),
-            "suspended_keys": [list(k) for k in self.suspended_keys],
-            "last_reset_day": self._last_reset_day,
-        }
-
-    def restore_state(self, state: dict) -> None:
-        # Threshold/dimension/reset_daily are also restored for completeness
-        if "threshold" in state:
-            self.threshold = int(state["threshold"])
-        if "dimension" in state:
-            self.dimension = StatsDimension(state["dimension"])
-        if "reset_daily" in state:
-            self.reset_daily = bool(state["reset_daily"])
-        # Rebuild counters and suspensions
-        self.counters = MultiDimCounter()
-        for k_list, v in state.get("counters", []):
-            self.counters.add(tuple(k_list), int(v))
-        self.suspended_keys = set(tuple(k) for k in state.get("suspended_keys", []))
-        self._last_reset_day = state.get("last_reset_day")
+        if new_value >= self.threshold:
+            return RuleResult(actions=list(self.actions), reasons=[
+                f"{self.metric} 达到阈值: {new_value} >= {self.threshold}",
+            ])
+        return None
 
 
-class OrderRateLimitRule(BaseRule):
-    """Suspend ordering if order submissions exceed threshold per time window.
+@dataclass(slots=True)
+class OrderRateLimitRule(Rule):
+    """报单频控规则（滑动窗口）。
 
-    Uses a per-key sliding window with lock-free deques. Auto-resume when rate
-    falls back below the configured threshold.
+    - 支持动态调整阈值与窗口大小。
+    - 当窗口内计数超过阈值时触发暂停；当降至阈值以下时自动恢复。
+    - 支持账户/合约/产品维度（通过 `dimension` 指定）。
     """
 
-    def __init__(
-        self,
-        threshold: int,
-        window_ns: int,
-        dimension: StatsDimension,
-        context: RuleContext,
-    ) -> None:
-        self.threshold = threshold
-        self.window_ns = window_ns
-        self.dimension = dimension
-        self.context = context
-        self.events: Dict[Key, Deque[int]] = defaultdict(deque)
-        self.suspended: Dict[Key, bool] = {}
+    rule_id: str
+    threshold: int
+    window_seconds: int
+    suspend_actions: Tuple[Action, ...] = (Action.SUSPEND_ORDERING,)
+    resume_actions: Tuple[Action, ...] = (Action.RESUME_ORDERING,)
+    # 新增：支持维度（account/contract/product）。默认按账户维度
+    dimension: str = "account"  # 可取值："account" | "contract" | "product"
 
-    def _make_key(self, order: Order) -> Key:
-        account_id = order.account_id
-        if self.dimension == StatsDimension.ACCOUNT:
-            return (account_id,)
-        if self.dimension == StatsDimension.CONTRACT:
-            return (account_id, order.contract_id)
-        if self.dimension == StatsDimension.PRODUCT:
-            product_id = self.context.product_resolver.resolve_product(order.contract_id) or "unknown"
-            return (account_id, product_id)
-        return (account_id,)
+    def _get_or_create_counter(self, ctx: RuleContext) -> RollingWindowCounter:
+        counter = ctx.order_rate_windows.get(self.rule_id)
+        if counter is None or counter._window_size != self.window_seconds:
+            # 窗口调整时重建
+            counter = RollingWindowCounter(self.window_seconds)
+            ctx.order_rate_windows[self.rule_id] = counter
+        return counter
 
-    def _evict_old(self, key: Key, now_ns: int) -> None:
-        dq = self.events[key]
-        boundary = now_ns - self.window_ns
-        while dq and dq[0] <= boundary:
-            dq.popleft()
+    def _make_key(self, ctx: RuleContext, order: Order) -> Tuple[str, ...]:
+        if self.dimension == "account":
+            return (order.account_id,)
+        if self.dimension == "contract":
+            return (order.account_id, order.contract_id)
+        if self.dimension == "product":
+            product_id = ctx.catalog.contract_to_product.get(order.contract_id)
+            return (order.account_id, product_id or order.contract_id)
+        return (order.account_id,)
 
-    def process_order(self, order: Order) -> List[Action]:
-        actions: List[Action] = []
-        key = self._make_key(order)
-        now_ns = order.timestamp
-        dq = self.events[key]
-        dq.append(now_ns)
-        self._evict_old(key, now_ns)
-        count = len(dq)
-
-        is_suspended = self.suspended.get(key, False)
-        if count > self.threshold and not is_suspended:
-            self.suspended[key] = True
-            actions.append(
-                Action(
-                    type=ActionType.SUSPEND_ORDERING,
-                    account_id=order.account_id,
-                    reason=f"Order rate {count}/{self.window_ns}ns exceeds {self.threshold}",
-                    metadata={"key": key, "count": count},
-                )
-            )
-        elif count <= self.threshold and is_suspended:
-            self.suspended[key] = False
-            actions.append(
-                Action(
-                    type=ActionType.RESUME_ORDERING,
-                    account_id=order.account_id,
-                    reason=f"Order rate normalized to {count}/{self.window_ns}ns",
-                    metadata={"key": key, "count": count},
-                )
-            )
-        return actions
-
-    def update_config(
-        self,
-        *,
-        threshold: Optional[int] = None,
-        window_ns: Optional[int] = None,
-        dimension: Optional[StatsDimension] = None,
-    ) -> None:
-        if threshold is not None:
-            self.threshold = threshold
-        if window_ns is not None:
-            self.window_ns = window_ns
-        if dimension is not None:
-            self.dimension = dimension
+    def on_order(self, ctx: RuleContext, order: Order) -> Optional[RuleResult]:
+        counter = self._get_or_create_counter(ctx)
+        key = self._make_key(ctx, order)
+        counter.add(key, order.timestamp, 1)
+        window_total = counter.total(key, order.timestamp)
+        if window_total > self.threshold:
+            return RuleResult(actions=list(self.suspend_actions), reasons=[
+                f"报单频率超阈: {window_total} > {self.threshold} (窗口{self.window_seconds}s)",
+            ])
+        elif window_total <= self.threshold:
+            return RuleResult(actions=list(self.resume_actions), reasons=[
+                f"报单频率恢复: {window_total} <= {self.threshold} (窗口{self.window_seconds}s)",
+            ])
+        return None
