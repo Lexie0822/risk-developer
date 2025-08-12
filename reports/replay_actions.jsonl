@@ -1,0 +1,2 @@
+{'type': 'SUSPEND_ORDERING', 'account': 'ACC_CSV', 'reason': 'Order rate 4/1000000000ns exceeds 3', 'meta': {'key': ('ACC_CSV',), 'count': 4}}
+{'type': 'SUSPEND_ACCOUNT_TRADING', 'account': 'ACC_CSV', 'reason': 'Volume limit exceeded: 1100 > 1000 on account', 'meta': {'key': ('ACC_CSV',)}}
