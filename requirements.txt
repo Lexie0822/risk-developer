@@ -1,1 +1,1 @@
-# No third-party dependencies are required for this demo engine.
+pytest==8.2.2

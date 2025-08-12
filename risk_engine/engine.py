@@ -1,123 +1,46 @@
 from __future__ import annotations
+from typing import Dict, Iterable, List, Optional, Tuple
 
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Iterable
-
-from .actions import Action
-from .config import RiskEngineConfig
-from .models import Order, Trade, ProductResolver
-from .rules import BaseRule, VolumeLimitRule, OrderRateLimitRule, RuleContext
-from .stats import StatsDimension
+from .models import Order, Trade
+from .actions import ActionEvent
+from .config import EngineConfig, VolumeLimitRuleConfig, OrderRateLimitRuleConfig
+from .rules import VolumeLimitRule, OrderRateLimitRule
 
 
-@dataclass(slots=True)
 class RiskEngine:
-    config: RiskEngineConfig
-    product_resolver: ProductResolver = field(init=False)
-    rules: List[BaseRule] = field(init=False, default_factory=list)
-    _oid_to_order: Dict[int, Order] = field(init=False, default_factory=dict)
-    # keep optional direct refs for management API
-    _volume_rule: Optional[VolumeLimitRule] = field(init=False, default=None)
-    _order_rate_rule: Optional[OrderRateLimitRule] = field(init=False, default=None)
+    def __init__(self, cfg: EngineConfig) -> None:
+        self.cfg = cfg
+        # O(1) order lookup for trade attribution
+        self._order_index: Dict[int, Tuple[str, str]] = {}
 
-    def __post_init__(self) -> None:
-        self.product_resolver = ProductResolver(self.config.contract_to_product)
-        self.rules = []
-        context = RuleContext(product_resolver=self.product_resolver)
-        if self.config.volume_limit is not None:
-            vl = self.config.volume_limit
-            self._volume_rule = VolumeLimitRule(
-                threshold=vl.threshold,
-                dimension=vl.dimension,
-                context=context,
-                reset_daily=vl.reset_daily,
-            )
-            self.rules.append(self._volume_rule)
-        if self.config.order_rate_limit is not None:
-            rl = self.config.order_rate_limit
-            self._order_rate_rule = OrderRateLimitRule(
-                threshold=rl.threshold,
-                window_ns=rl.window_ns,
-                dimension=rl.dimension,
-                context=context,
-            )
-            self.rules.append(self._order_rate_rule)
-        self._oid_to_order = {}
+        def resolve_product(contract_id: str) -> str:
+            return cfg.product_mapping.get(contract_id, contract_id[:1] if contract_id else "")
 
-    def ingest_order(self, order: Order) -> List[Action]:
-        # Keep minimal order book for correlating trades -> orders
-        self._oid_to_order[order.oid] = order
-        actions: List[Action] = []
+        def resolve_order_info(oid: int) -> Optional[Tuple[str, str]]:
+            return self._order_index.get(oid)
+
+        self.rules: List = []
+        if cfg.volume_limit is not None:
+            self.rules.append(VolumeLimitRule(cfg.volume_limit, resolve_product, resolve_order_info))
+        if cfg.order_rate_limit is not None:
+            self.rules.append(OrderRateLimitRule(cfg.order_rate_limit))
+
+    # ingestion APIs
+    def ingest_order(self, order: Order) -> Iterable[ActionEvent]:
+        self._order_index[order.oid] = (order.account_id, order.contract_id)
+        actions: List[ActionEvent] = []
         for rule in self.rules:
-            actions.extend(rule.process_order(order))
+            actions.extend(rule.on_order(order))
         return actions
 
-    def ingest_trade(self, trade: Trade) -> List[Action]:
-        related_order: Optional[Order] = self._oid_to_order.get(trade.oid)
-        actions: List[Action] = []
+    def ingest_trade(self, trade: Trade) -> Iterable[ActionEvent]:
+        actions: List[ActionEvent] = []
         for rule in self.rules:
-            actions.extend(rule.process_trade(trade, related_order))
+            actions.extend(rule.on_trade(trade))
         return actions
 
-    # Bulk/Vectorized ingestion for high-throughput pipelines
-    def ingest_orders_bulk(self, orders: Iterable[Order]) -> List[Action]:
-        actions: List[Action] = []
-        append_order = self._oid_to_order.__setitem__
-        rules = self.rules
-        for order in orders:
-            append_order(order.oid, order)
-            for rule in rules:
-                actions.extend(rule.process_order(order))
-        return actions
-
-    def ingest_trades_bulk(self, trades: Iterable[Trade]) -> List[Action]:
-        actions: List[Action] = []
-        oid_to_order = self._oid_to_order
-        rules = self.rules
-        for trade in trades:
-            related_order: Optional[Order] = oid_to_order.get(trade.oid)
-            for rule in rules:
-                actions.extend(rule.process_trade(trade, related_order))
-        return actions
-
-    # Hot update APIs
-    def update_volume_limit(self, *, threshold: Optional[int] = None, dimension: Optional[StatsDimension] = None, reset_daily: Optional[bool] = None) -> None:
-        if self._volume_rule is not None:
-            self._volume_rule.update_config(threshold=threshold, dimension=dimension, reset_daily=reset_daily)
-            if threshold is not None:
-                self.config.volume_limit.threshold = threshold
-            if dimension is not None:
-                self.config.volume_limit.dimension = dimension
-            if reset_daily is not None:
-                self.config.volume_limit.reset_daily = reset_daily
-
-    def update_order_rate_limit(self, *, threshold: Optional[int] = None, window_ns: Optional[int] = None, dimension: Optional[StatsDimension] = None) -> None:
-        if self._order_rate_rule is not None:
-            self._order_rate_rule.update_config(threshold=threshold, window_ns=window_ns, dimension=dimension)
-            if threshold is not None:
-                self.config.order_rate_limit.threshold = threshold
-            if window_ns is not None:
-                self.config.order_rate_limit.window_ns = window_ns
-            if dimension is not None:
-                self.config.order_rate_limit.dimension = dimension
-
-    # Simple persistence (snapshot/restore) focusing on volume rule state
-    def snapshot(self) -> dict:
-        data = {
-            "config": {
-                "contract_to_product": self.config.contract_to_product,
-            }
-        }
-        if self._volume_rule is not None:
-            data["volume_rule"] = self._volume_rule.snapshot_state()
-        return data
-
-    def restore(self, snapshot: dict) -> None:
-        if not snapshot:
-            return
-        mapping = snapshot.get("config", {}).get("contract_to_product")
-        if mapping:
-            self.product_resolver.set_mapping(mapping)
-            self.config.contract_to_product = dict(mapping)
-        if self._volume_rule is not None and "volume_rule" in snapshot:
-            self._volume_rule.restore_state(snapshot["volume_rule"])
+    # dynamic controls
+    def update_rate_limit(self, threshold: Optional[int] = None, window_ns: Optional[int] = None, bucket_ns: Optional[int] = None) -> None:
+        for rule in self.rules:
+            if isinstance(rule, OrderRateLimitRule):
+                rule.update_threshold(threshold, window_ns, bucket_ns)
