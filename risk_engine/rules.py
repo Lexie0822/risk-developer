@@ -10,6 +10,7 @@ from .stats import MultiDimCounter, StatsDimension
 
 
 Key = Tuple[str, ...]
+NS_PER_DAY = 86_400_000_000_000
 
 
 @dataclass(slots=True)
@@ -37,12 +38,17 @@ class VolumeLimitRule(BaseRule):
         threshold: int,
         dimension: StatsDimension,
         context: RuleContext,
+        *,
+        reset_daily: bool = True,
     ) -> None:
         self.threshold = threshold
         self.dimension = dimension
         self.context = context
+        self.reset_daily = reset_daily
+        self.counters = MultiDimCounter
         self.counters = MultiDimCounter()
         self.suspended_keys: set[Key] = set()
+        self._last_reset_day: Optional[int] = None
 
     def _make_key(self, order: Optional[Order], trade: Trade) -> Key:
         # Try to use information from order if provided (for account_id, contract)
@@ -60,8 +66,22 @@ class VolumeLimitRule(BaseRule):
             return (account_id, product_id)
         return (account_id,)
 
+    def _maybe_daily_reset(self, now_ns: int) -> None:
+        if not self.reset_daily:
+            return
+        current_day = now_ns // NS_PER_DAY
+        if self._last_reset_day is None:
+            self._last_reset_day = current_day
+            return
+        if current_day != self._last_reset_day:
+            # New UTC day: reset counters and suspensions
+            self.counters = MultiDimCounter()
+            self.suspended_keys.clear()
+            self._last_reset_day = current_day
+
     def process_trade(self, trade: Trade, related_order: Optional[Order]) -> List[Action]:
         actions: List[Action] = []
+        self._maybe_daily_reset(trade.timestamp)
         key = self._make_key(related_order, trade)
         new_value = self.counters.add(key, trade.volume)
         if new_value > self.threshold and key not in self.suspended_keys:
@@ -76,6 +96,46 @@ class VolumeLimitRule(BaseRule):
                 )
             )
         return actions
+
+    # Hot update and persistence helpers
+    def update_config(
+        self,
+        *,
+        threshold: Optional[int] = None,
+        dimension: Optional[StatsDimension] = None,
+        reset_daily: Optional[bool] = None,
+    ) -> None:
+        if threshold is not None:
+            self.threshold = threshold
+        if dimension is not None:
+            self.dimension = dimension
+        if reset_daily is not None:
+            self.reset_daily = reset_daily
+
+    def snapshot_state(self) -> dict:
+        return {
+            "threshold": self.threshold,
+            "dimension": self.dimension.value,
+            "reset_daily": self.reset_daily,
+            "counters": list((list(k), v) for k, v in self.counters.items()),
+            "suspended_keys": [list(k) for k in self.suspended_keys],
+            "last_reset_day": self._last_reset_day,
+        }
+
+    def restore_state(self, state: dict) -> None:
+        # Threshold/dimension/reset_daily are also restored for completeness
+        if "threshold" in state:
+            self.threshold = int(state["threshold"])
+        if "dimension" in state:
+            self.dimension = StatsDimension(state["dimension"])
+        if "reset_daily" in state:
+            self.reset_daily = bool(state["reset_daily"])
+        # Rebuild counters and suspensions
+        self.counters = MultiDimCounter()
+        for k_list, v in state.get("counters", []):
+            self.counters.add(tuple(k_list), int(v))
+        self.suspended_keys = set(tuple(k) for k in state.get("suspended_keys", []))
+        self._last_reset_day = state.get("last_reset_day")
 
 
 class OrderRateLimitRule(BaseRule):
@@ -147,3 +207,17 @@ class OrderRateLimitRule(BaseRule):
                 )
             )
         return actions
+
+    def update_config(
+        self,
+        *,
+        threshold: Optional[int] = None,
+        window_ns: Optional[int] = None,
+        dimension: Optional[StatsDimension] = None,
+    ) -> None:
+        if threshold is not None:
+            self.threshold = threshold
+        if window_ns is not None:
+            self.window_ns = window_ns
+        if dimension is not None:
+            self.dimension = dimension

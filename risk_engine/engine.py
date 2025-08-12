@@ -16,6 +16,9 @@ class RiskEngine:
     product_resolver: ProductResolver = field(init=False)
     rules: List[BaseRule] = field(init=False, default_factory=list)
     _oid_to_order: Dict[int, Order] = field(init=False, default_factory=dict)
+    # keep optional direct refs for management API
+    _volume_rule: Optional[VolumeLimitRule] = field(init=False, default=None)
+    _order_rate_rule: Optional[OrderRateLimitRule] = field(init=False, default=None)
 
     def __post_init__(self) -> None:
         self.product_resolver = ProductResolver(self.config.contract_to_product)
@@ -23,23 +26,22 @@ class RiskEngine:
         context = RuleContext(product_resolver=self.product_resolver)
         if self.config.volume_limit is not None:
             vl = self.config.volume_limit
-            self.rules.append(
-                VolumeLimitRule(
-                    threshold=vl.threshold,
-                    dimension=vl.dimension,
-                    context=context,
-                )
+            self._volume_rule = VolumeLimitRule(
+                threshold=vl.threshold,
+                dimension=vl.dimension,
+                context=context,
+                reset_daily=vl.reset_daily,
             )
+            self.rules.append(self._volume_rule)
         if self.config.order_rate_limit is not None:
             rl = self.config.order_rate_limit
-            self.rules.append(
-                OrderRateLimitRule(
-                    threshold=rl.threshold,
-                    window_ns=rl.window_ns,
-                    dimension=rl.dimension,
-                    context=context,
-                )
+            self._order_rate_rule = OrderRateLimitRule(
+                threshold=rl.threshold,
+                window_ns=rl.window_ns,
+                dimension=rl.dimension,
+                context=context,
             )
+            self.rules.append(self._order_rate_rule)
         self._oid_to_order = {}
 
     def ingest_order(self, order: Order) -> List[Action]:
@@ -56,3 +58,45 @@ class RiskEngine:
         for rule in self.rules:
             actions.extend(rule.process_trade(trade, related_order))
         return actions
+
+    # Hot update APIs
+    def update_volume_limit(self, *, threshold: Optional[int] = None, dimension: Optional[StatsDimension] = None, reset_daily: Optional[bool] = None) -> None:
+        if self._volume_rule is not None:
+            self._volume_rule.update_config(threshold=threshold, dimension=dimension, reset_daily=reset_daily)
+            if threshold is not None:
+                self.config.volume_limit.threshold = threshold
+            if dimension is not None:
+                self.config.volume_limit.dimension = dimension
+            if reset_daily is not None:
+                self.config.volume_limit.reset_daily = reset_daily
+
+    def update_order_rate_limit(self, *, threshold: Optional[int] = None, window_ns: Optional[int] = None, dimension: Optional[StatsDimension] = None) -> None:
+        if self._order_rate_rule is not None:
+            self._order_rate_rule.update_config(threshold=threshold, window_ns=window_ns, dimension=dimension)
+            if threshold is not None:
+                self.config.order_rate_limit.threshold = threshold
+            if window_ns is not None:
+                self.config.order_rate_limit.window_ns = window_ns
+            if dimension is not None:
+                self.config.order_rate_limit.dimension = dimension
+
+    # Simple persistence (snapshot/restore) focusing on volume rule state
+    def snapshot(self) -> dict:
+        data = {
+            "config": {
+                "contract_to_product": self.config.contract_to_product,
+            }
+        }
+        if self._volume_rule is not None:
+            data["volume_rule"] = self._volume_rule.snapshot_state()
+        return data
+
+    def restore(self, snapshot: dict) -> None:
+        if not snapshot:
+            return
+        mapping = snapshot.get("config", {}).get("contract_to_product")
+        if mapping:
+            self.product_resolver.set_mapping(mapping)
+            self.config.contract_to_product = dict(mapping)
+        if self._volume_rule is not None and "volume_rule" in snapshot:
+            self._volume_rule.restore_state(snapshot["volume_rule"])
