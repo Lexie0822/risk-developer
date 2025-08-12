@@ -66,3 +66,59 @@ engine.on_trade(Trade(1, 1, "ACC_001", "T2303", 100.0, 10, 1_700_000_000_000_000
   - 采用 NUMA 亲和与 CPU 绑核，规避跨核迁移。
 
 > 当前实现已在算法层面满足高并发与低延迟诉求，并提供清晰的扩展位；在生产中可按上述方向替换为原生实现以达成微秒级服务级别目标。
+
+## 兼容老接口（RiskEngineConfig）
+```python
+from risk_engine import RiskEngine
+from risk_engine.config import RiskEngineConfig, VolumeLimitRuleConfig, OrderRateLimitRuleConfig
+from risk_engine.models import Order, Trade, Direction
+from risk_engine.stats import StatsDimension
+
+engine = RiskEngine(
+    RiskEngineConfig(
+        volume_limit=VolumeLimitRuleConfig(threshold=1000, dimension=StatsDimension.ACCOUNT, reset_daily=True),
+        order_rate_limit=OrderRateLimitRuleConfig(threshold=50, window_ns=1_000_000_000, dimension=StatsDimension.PRODUCT),
+        contract_to_product={"T2303": "T10Y", "T2306": "T10Y"},
+    )
+)
+
+# 老接口事件入口（返回兼容测试的动作列表）
+acts1 = engine.ingest_order(Order(oid=1, account_id="ACC", contract_id="T2303", direction=Direction.BID, price=100.0, volume=1, timestamp=1_700_000_000_000_000_000))
+acts2 = engine.ingest_trade(Trade(tid=1, oid=1, price=100.0, volume=10, timestamp=1_700_000_000_000_000_100))
+```
+
+## 热更新与快照
+```python
+# 热更新（阈值、窗口、维度）
+engine.update_order_rate_limit(threshold=100, window_ns=500_000_000)
+engine.update_volume_limit(threshold=10_000, dimension=StatsDimension.PRODUCT)
+
+# 快照/恢复（包含合约-产品映射与按日成交量状态）
+snap = engine.snapshot()
+engine.restore(snap)
+```
+
+## 目录结构
+- `risk_engine/models.py`：订单、成交、方向与扩展维度
+- `risk_engine/actions.py`：动作枚举与兼容测试的 `EmittedAction`
+- `risk_engine/metrics.py`：指标类型定义
+- `risk_engine/dimensions.py`：合约静态属性目录与维度键
+- `risk_engine/state.py`：分片字典、日计数、多桶滑窗
+- `risk_engine/rules.py`：规则实现（成交/金额/报单量限制、报单频控）
+- `risk_engine/engine.py`：引擎装配、事件入口、动作去抖、热更新与快照
+- `risk_engine/config.py`、`risk_engine/stats.py`：老接口兼容
+- `tests/`：单元测试（已全绿）
+- `bench.py`：吞吐评估脚本（本机环境下运行）
+
+## 基准与性能说明
+- 运行：`python3 /workspace/bench.py`
+- 说明：该脚本用于评估当前机器上的单进程吞吐。生产中建议多进程分片（按账户/Key）、绑核与原生扩展（Cython/Rust）以达成“百万级/秒、微秒级”目标。
+- 我们不在文档中固化具体数字，以避免不同硬件/负载场景下的误导；但架构与实现已为零拷贝/原生加速留好接口。
+
+## 需求符合性清单
+- [x] 规则1：单账户成交量限制（支持指标扩展：金额/报单/撤单；支持账户/合约/产品/交易所/账户组多维）
+- [x] 规则2：报单频率控制（支持动态阈值与窗口、自动恢复；支持账户/合约/产品维度）
+- [x] Action：统一枚举输出，规则可配置多个动作
+- [x] 多维统计引擎：支持产品维度聚合，可扩展新增维度
+- [x] 高并发/低延迟：分片锁+桶化滑窗+slots 优化；读路径无锁
+- [x] 接口与文档：新/旧接口、热更新、快照、示例、测试与基准脚本
