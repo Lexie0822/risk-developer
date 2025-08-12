@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Iterable
 
 from .actions import Action
 from .config import RiskEngineConfig
@@ -57,6 +57,27 @@ class RiskEngine:
         actions: List[Action] = []
         for rule in self.rules:
             actions.extend(rule.process_trade(trade, related_order))
+        return actions
+
+    # Bulk/Vectorized ingestion for high-throughput pipelines
+    def ingest_orders_bulk(self, orders: Iterable[Order]) -> List[Action]:
+        actions: List[Action] = []
+        append_order = self._oid_to_order.__setitem__
+        rules = self.rules
+        for order in orders:
+            append_order(order.oid, order)
+            for rule in rules:
+                actions.extend(rule.process_order(order))
+        return actions
+
+    def ingest_trades_bulk(self, trades: Iterable[Trade]) -> List[Action]:
+        actions: List[Action] = []
+        oid_to_order = self._oid_to_order
+        rules = self.rules
+        for trade in trades:
+            related_order: Optional[Order] = oid_to_order.get(trade.oid)
+            for rule in rules:
+                actions.extend(rule.process_trade(trade, related_order))
         return actions
 
     # Hot update APIs
