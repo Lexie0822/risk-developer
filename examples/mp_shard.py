@@ -1,86 +1,48 @@
 from __future__ import annotations
 
-import hashlib
-import multiprocessing as mp
-import os
 import time
-from dataclasses import asdict
-from typing import List, Tuple
-
-from risk_engine.config import OrderRateLimitRuleConfig, RiskEngineConfig, VolumeLimitRuleConfig
-from risk_engine.engine import RiskEngine
-from risk_engine.models import Direction, Order, Trade
-from risk_engine.stats import StatsDimension
+from risk_engine import RiskEngine, EngineConfig, Order, Trade, Direction, Action
+from risk_engine.rules import AccountTradeMetricLimitRule, OrderRateLimitRule
+from risk_engine.metrics import MetricType
+from risk_engine.adapters.sharding import run_sharded_engine, ShardConfig
 
 
-def shard_for_account(account_id: str, num_shards: int) -> int:
-    h = hashlib.blake2b(account_id.encode(), digest_size=2).digest()
-    return int.from_bytes(h, "little") % num_shards
-
-
-def worker(shard_id: int, in_q: mp.Queue, out_q: mp.Queue) -> None:
-    engine = RiskEngine(
-        RiskEngineConfig(
-            volume_limit=VolumeLimitRuleConfig(threshold=1000, dimension=StatsDimension.ACCOUNT),
-            order_rate_limit=OrderRateLimitRuleConfig(threshold=50, window_ns=1_000_000_000),
-            contract_to_product={"T2303": "T"},
-        )
-    )
-    while True:
-        msg = in_q.get()
-        if msg is None:
-            break
-        typ, payload = msg
-        if typ == "order":
-            actions = engine.ingest_order(Order(**payload))
-        else:
-            actions = engine.ingest_trade(Trade(**payload))
-        for a in actions:
-            out_q.put(a.short())
-    out_q.put({"shard": shard_id, "status": "done"})
-
-
-def demo(num_shards: int = 2) -> None:
-    in_queues = [mp.Queue(maxsize=10_000) for _ in range(num_shards)]
-    out_q = mp.Queue()
-    procs = [mp.Process(target=worker, args=(i, in_queues[i], out_q)) for i in range(num_shards)]
-    for p in procs:
-        p.start()
-
-    # Feed data sharded by account
-    ts = time.time_ns()
-    for i in range(200):
-        acc = f"ACC_{i % 4}"
-        shard = shard_for_account(acc, num_shards)
-        in_queues[shard].put((
-            "order",
-            dict(
-                oid=i,
-                account_id=acc,
-                contract_id="T2303",
-                direction=Direction.BID,
-                price=100.0,
-                volume=1,
-                timestamp=ts + i,
+def make_engine(_: int) -> RiskEngine:
+    return RiskEngine(
+        EngineConfig(
+            contract_to_product={"T2303": "T10Y"},
+            contract_to_exchange={"T2303": "CFFEX"},
+            deduplicate_actions=True,
+        ),
+        rules=[
+            AccountTradeMetricLimitRule(
+                rule_id="VOL-1e9", metric=MetricType.TRADE_VOLUME, threshold=1e9,
+                actions=(Action.SUSPEND_ACCOUNT_TRADING,), by_account=True, by_product=True,
             ),
-        ))
+            OrderRateLimitRule(
+                rule_id="ORDER-1e9-1S", threshold=1_000_000_000, window_seconds=1,
+                suspend_actions=(Action.SUSPEND_ORDERING,), resume_actions=(Action.RESUME_ORDERING,),
+            ),
+        ],
+        action_sink=lambda a, r, o: None,
+    )
 
-    # Signal finish
-    for q in in_queues:
-        q.put(None)
 
-    # Collect a few outputs
-    done = 0
-    while done < num_shards:
-        m = out_q.get()
-        if isinstance(m, dict) and m.get("status") == "done":
-            done += 1
-        else:
-            print("Action:", m)
-
-    for p in procs:
-        p.join()
+def gen_events(n: int):
+    base_ts = 2_000_000_000_000_000_000
+    for i in range(n):
+        yield Order(i+1, f"ACC_{i%64}", "T2303", Direction.BID, 100.0, 1, base_ts)
+        if (i % 4) == 0:
+            yield Trade(i+1, i+1, 100.0, 1, base_ts, account_id=f"ACC_{i%64}", contract_id="T2303")
 
 
 if __name__ == "__main__":
-    demo()
+    t0 = time.perf_counter()
+    run_sharded_engine(
+        shard_config=ShardConfig(num_workers=4),
+        make_engine=make_engine,
+        event_iter=gen_events(200_000),
+        key_fn=lambda e: e.account_id,
+    )
+    t1 = time.perf_counter()
+    print(f"mp_shard processed in {t1 - t0:.3f}s")
