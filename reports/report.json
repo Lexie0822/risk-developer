@@ -1,0 +1,26 @@
+{
+  "tests": {
+    "testsRun": 7,
+    "failures": [],
+    "errors": [],
+    "skipped": [],
+    "ok": true,
+    "raw_output": "test_deterministic_action_sequence (test_e2e.E2EVerificationTests.test_deterministic_action_sequence) ... ok\ntest_hot_update (test_rules.RiskEngineTests.test_hot_update) ... ok\ntest_order_rate_limit_trigger_and_resume (test_rules.RiskEngineTests.test_order_rate_limit_trigger_and_resume) ... ok\ntest_persistence_roundtrip (test_rules.RiskEngineTests.test_persistence_roundtrip) ... ok\ntest_volume_limit_and_daily_reset (test_rules.RiskEngineTests.test_volume_limit_and_daily_reset) ... ok\ntest_order_rate_limit_by_product (test_rules_product.ProductDimensionTests.test_order_rate_limit_by_product) ... ok\ntest_volume_limit_by_product (test_rules_product.ProductDimensionTests.test_volume_limit_by_product) ... ok\n\n----------------------------------------------------------------------\nRan 7 tests in 0.001s\n\nOK\n"
+  },
+  "demo": {
+    "rate_limit_actions": [
+      "{'type': 'SUSPEND_ORDERING', 'account': 'ACC_001', 'reason': 'Order rate 6/1000000000ns exceeds 5', 'meta': {'key': ('ACC_001',), 'count': 6}}"
+    ],
+    "volume_limit_actions": [
+      "{'type': 'SUSPEND_ACCOUNT_TRADING', 'account': 'ACC_001', 'reason': 'Volume limit exceeded: 1200 > 1000 on account', 'meta': {'key': ('ACC_001',)}}"
+    ]
+  },
+  "benchmark": {
+    "num_orders": 200000,
+    "num_trades": 100000,
+    "orders_seconds": 0.302813,
+    "trades_seconds": 0.077975,
+    "orders_tps": 660473,
+    "trades_tps": 1282460
+  }
+}
