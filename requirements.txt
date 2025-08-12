@@ -1,1 +1,1 @@
-# No third-party dependencies are required for this demo engine.
+uvloop>=0.19.0; platform_system != 'Windows'

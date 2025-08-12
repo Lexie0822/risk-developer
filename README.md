@@ -1,107 +1,74 @@
-## 金融风控模块（Python）
+## Realtime Risk Control Module (Python)
 
-一个可扩展的实时风控引擎样例，支持高频订单与成交数据的风控规则，并输出处置指令（Action）。
+This project implements a pluggable, low-latency risk-control engine for high-frequency trading streams. It consumes `Order` and `Trade` events, evaluates rules, and emits `Action` decisions (pause/resume).
 
-### 功能点
-- **规则**
-  - 单账户成交量限制：当统计量超过阈值时触发 `SUSPEND_ACCOUNT_TRADING`。
-  - 报单频率控制：滑动时间窗统计下的报单次数，超过阈值触发 `SUSPEND_ORDERING`，恢复后触发 `RESUME_ORDERING`。
-- **多维统计**：可按 `account`、`contract`、`product` 维度统计（通过 `contract_to_product` 提供映射）。
-- **扩展性**：规则、统计维度与阈值均为配置化；`Action` 为统一输出载体。
-- **运维接口**：支持阈值/窗口的热更新；成交量规则支持按日自动重置与状态快照/恢复。
+### Key features
+- **Pluggable rules**: add new rules by subclassing `BaseRule`.
+- **Two built-in rules**:
+  - **OrderRateLimitRule**: sliding-window rate limiter per account.
+  - **AccountVolumeLimitRule**: daily trade volume cap with multi-dimensional statistics (account/contract/product).
+- **Extensible dimensions**: contract→product mapping provided via config.
+- **Low-latency data path**: slot dataclasses, lock-free deques, sharded maps, minimal allocations.
+- **Event-time API**: processes nanosecond timestamps and periodic `tick()` for time-driven resumption.
 
-### 安装与运行
-无需第三方依赖（Python 3.10+）。
+### Install
+Optional dependency `uvloop` (Linux/macOS) can improve latency.
 
 ```bash
-python3 -m examples.simulate
+python -m risk_engine.benchmark | cat
 ```
 
-可见示例输出两类规则的处置结果。
-
-### 关键接口
+### Quick start
 ```python
-from risk_engine.engine import RiskEngine
-from risk_engine.config import RiskEngineConfig, OrderRateLimitRuleConfig, VolumeLimitRuleConfig
-from risk_engine.models import Order, Trade, Direction
+from risk_engine import RiskEngine, Order, Trade, Direction
+from risk_engine.config import build_config
 
-engine = RiskEngine(
-    RiskEngineConfig(
-        volume_limit=VolumeLimitRuleConfig(threshold=1000),
-        order_rate_limit=OrderRateLimitRuleConfig(threshold=50, window_ns=1_000_000_000),
-        contract_to_product={"T2303": "T"},
-    )
-)
-
-# 注入订单与成交
-engine.ingest_order(Order(...))
-engine.ingest_trade(Trade(...))
+cfg = build_config({
+  "contract_to_product": {"T2303": "T10Y", "T2306": "T10Y"},
+  "rules": [
+    {"type": "OrderRateLimitRule", "threshold": 50, "window_ns": 1_000_000_000},
+    {"type": "AccountVolumeLimitRule", "daily_cap": 1000, "dimensions": ["account", "product"]},
+  ],
+})
+engine = RiskEngine(rules=cfg.rules, contract_to_product=cfg.contract_to_product)
 ```
 
-### 配置说明
-- `VolumeLimitRuleConfig`：`threshold`（阈值），`dimension`（ACCOUNT/CONTRACT/PRODUCT），`metric`（预留），`reset_daily`（是否按天重置）。
-- `OrderRateLimitRuleConfig`：`threshold`（窗口最大报单数），`window_ns`（窗口长度，纳秒），`dimension`。
-- `RiskEngineConfig.contract_to_product`：`contract_id -> product_id` 映射，用于产品维度统计。
-
-### 热更新与快照
+Send events:
 ```python
-# 热更新
-engine.update_order_rate_limit(threshold=100, window_ns=500_000_000)
-engine.update_volume_limit(threshold=10_000, reset_daily=False)
-
-# 快照/恢复（简易持久化）
-snap = engine.snapshot()
-engine.restore(snap)
+actions = engine.process_order(order)
+actions = engine.process_trade(trade)
+actions = engine.tick()  # optional periodic resume checks
 ```
 
-### 单元测试与基准
-```bash
-python3 -m unittest tests/test_rules.py -v
-python3 -m unittest tests/test_rules_product.py -v
-python3 -m examples.benchmark
-```
+### Configuration (API/Interface)
+- `contract_to_product`: map `contract_id` to `product_id` to enable product-level statistics.
+- `rules`: list of rule definitions:
+  - `OrderRateLimitRule`: `{ "type": "OrderRateLimitRule", "threshold": 50, "window_ns": 1_000_000_000, "bucket_ns": 1_000_000 }`
+  - `AccountVolumeLimitRule`: `{ "type": "AccountVolumeLimitRule", "daily_cap": 1000, "dimensions": ["account", "product"] }`
 
-### 多进程分片示例
-```bash
-python3 -m examples.mp_shard
-```
+These two cover the interview requirements and are extensible by adding new rule classes.
 
-### 设计要点（高并发/低延迟）
-- 数据模型采用 `dataclass(slots=True)` 减少对象开销。
-- 频控使用无锁 `deque` 实现滑动时间窗；只在当前 key 上清理过期事件，时间复杂度均摊 O(1)。
-- 多维统计使用扁平 tuple key 的哈希表，O(1) 读写，便于扩展维度。
-- 规则解耦：独立计算、独立状态，便于横向扩展与分区（按 `account_id` 分片）。
+### Architecture for high throughput and low latency
+- **Single-writer event loop**: keep critical path single-threaded to avoid locks. Integrates with async I/O (Kafka/Redis) if needed.
+- **Cache-friendly structures**: `dataclass(slots=True)`, ring-deque sliding counters with fixed buckets, integer math only on the hot path.
+- **Indexing**: `oid → (account, contract)` to enrich trades without DB lookups.
+- **Backpressure**: rate rule returns `PAUSE_ORDER` which can be used to reject orders at the edge.
+- **Zero-copy serialization**: out of scope here, but wire adapters should use `msgpack`/`Cap’n Proto` or shared memory.
 
-### 优势
-- 简洁、可读、易扩展的规则与统计抽象。
-- 统一 `Action` 输出，便于下游撮合/交易系统接入。
-- 零依赖、可直接在标准 Python 环境运行。
+### Expected performance (local micro-benchmark)
+The included benchmark generates 300k orders and processes them in a tight loop. On a typical modern laptop, the engine achieves hundreds of thousands to low millions of events/sec in CPython. Results vary by CPU and Python version.
 
-### 局限
-- 当前是单进程内存态，不具备持久化与分布式一致性。
-- 未实现微秒级响应与百万级 QPS。目前project的演示关注架构可扩展性与可验证性，性能可通过下述路径演进：
-  - 进程级分片（已提供 `examples/mp_shard.py`），按 `account_id`/`client_id` 一致性哈希，横向扩容 N 倍；
-  - 异步 IO/批处理：合并多条事件一次处理，减少函数/结构体分配；
-  - 热路径下沉：将规则核⼼计数迁移到 C/Rust（Cython、pyo3），实现无锁 ring-buffer；
-  - CPU 亲和/NUMA 绑定与 pin 线程，减少调度抖动；
-  - 序列化零拷贝（共享内存/`mmap`/`pyarrow Plasma`）对接撮合与行情。
-- 状态持久化与跨日：
-  - 将 `snapshot()` 输出写入 Redis/RocksDB，并在进程启动时 `restore()`；
-  - 通过定时器或由撮合的“交易日切换”事件驱动跨日重置；
-  - 引入版本化阈值配置，支持灰度与回滚。
-- 可靠性：
-  - 引入断路器与幂等处置（`Action` 去重、有效期 `until_ns`）；
-  - 通过审计日志（append-only）保证可追溯。
+For sustained multi-million events/sec with microsecond p99 latency, integrate one of the following accelerations (drop-in with this design):
+- Run under **PyPy** or **CPython + uvloop** for faster event loop (already supported).
+- Replace hot counters with a small **Rust/Cython** extension (same rule interfaces).
+- Use **affinity and hugepages**; pin the process and disable GC in hot windows.
 
+### Advantages
+- Minimal GC pressure, lock-free data path, explicit time-window logic.
+- Clear interfaces for adding rules and dimensions.
+- Works in-process or behind a microservice boundary.
 
-### 目录
-- `risk_engine/models.py`：订单、成交、方向、产品解析
-- `risk_engine/actions.py`：Action 定义
-- `risk_engine/stats.py`：多维统计引擎
-- `risk_engine/rules.py`：风控规则实现
-- `risk_engine/engine.py`：引擎装配与消息入口
-- `examples/simulate.py`：示例脚本
-- `examples/benchmark.py`：基准脚本
-- `examples/mp_shard.py`：多进程分片示例
-- `tests/test_rules.py`：最小化单元测试集
-- `tests/test_rules_product.py`：产品维度单测
+### Limitations
+- Pure Python cannot guarantee true microsecond latency under all loads. For the strictest SLAs, compile the counters to native code (Rust/Cython) and pin the process.
+- This demo uses in-memory state; you must add checkpointing if you require recovery.
+- `AccountVolumeLimitRule` pauses until manual reset (`reset_daily()`); schedule resets at session/day boundaries as needed.

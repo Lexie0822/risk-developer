@@ -1,102 +1,80 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+import time
+from collections import defaultdict
+from typing import Dict, Iterable, List, Optional
 
-from .actions import Action
-from .config import RiskEngineConfig
-from .models import Order, Trade, ProductResolver
-from .rules import BaseRule, VolumeLimitRule, OrderRateLimitRule, RuleContext
-from .stats import StatsDimension
+from .actions import ActionEvent
+from .models import Order, Trade
+from .rules import AccountVolumeLimitRule, BaseRule, RuleContext
 
 
-@dataclass(slots=True)
 class RiskEngine:
-    config: RiskEngineConfig
-    product_resolver: ProductResolver = field(init=False)
-    rules: List[BaseRule] = field(init=False, default_factory=list)
-    _oid_to_order: Dict[int, Order] = field(init=False, default_factory=dict)
-    # keep optional direct refs for management API
-    _volume_rule: Optional[VolumeLimitRule] = field(init=False, default=None)
-    _order_rate_rule: Optional[OrderRateLimitRule] = field(init=False, default=None)
+    def __init__(
+        self,
+        *,
+        rules: List[BaseRule],
+        contract_to_product: Optional[Dict[str, str]] = None,
+    ) -> None:
+        self.rules = rules
+        self.contract_to_product = contract_to_product or {}
+        # Lightweight cache from oid to (account_id, contract_id)
+        self._order_index: Dict[int, tuple[str, str]] = {}
+        # Account status flags that downstream systems may consult
+        self.account_paused_for_order: Dict[str, bool] = defaultdict(bool)
+        self.account_paused_for_trading: Dict[str, bool] = defaultdict(bool)
 
-    def __post_init__(self) -> None:
-        self.product_resolver = ProductResolver(self.config.contract_to_product)
-        self.rules = []
-        context = RuleContext(product_resolver=self.product_resolver)
-        if self.config.volume_limit is not None:
-            vl = self.config.volume_limit
-            self._volume_rule = VolumeLimitRule(
-                threshold=vl.threshold,
-                dimension=vl.dimension,
-                context=context,
-                reset_daily=vl.reset_daily,
-            )
-            self.rules.append(self._volume_rule)
-        if self.config.order_rate_limit is not None:
-            rl = self.config.order_rate_limit
-            self._order_rate_rule = OrderRateLimitRule(
-                threshold=rl.threshold,
-                window_ns=rl.window_ns,
-                dimension=rl.dimension,
-                context=context,
-            )
-            self.rules.append(self._order_rate_rule)
-        self._oid_to_order = {}
+    def _ctx(self) -> RuleContext:
+        return RuleContext(contract_to_product=self.contract_to_product)
 
-    def ingest_order(self, order: Order) -> List[Action]:
-        # Keep minimal order book for correlating trades -> orders
-        self._oid_to_order[order.oid] = order
-        actions: List[Action] = []
+    def process_order(self, order: Order) -> List[ActionEvent]:
+        self._order_index[order.oid] = (order.account_id, order.contract_id)
+        ctx = self._ctx()
+        actions: List[ActionEvent] = []
         for rule in self.rules:
-            actions.extend(rule.process_order(order))
+            actions.extend(rule.on_order(order, ctx))
+        self._apply_side_effects(actions)
         return actions
 
-    def ingest_trade(self, trade: Trade) -> List[Action]:
-        related_order: Optional[Order] = self._oid_to_order.get(trade.oid)
-        actions: List[Action] = []
+    def process_trade(self, trade: Trade) -> List[ActionEvent]:
+        # Enrich with original order metadata if available
+        account_id: Optional[str] = None
+        contract_id: Optional[str] = None
+        if trade.oid in self._order_index:
+            account_id, contract_id = self._order_index[trade.oid]
+        ctx = self._ctx()
+        actions: List[ActionEvent] = []
         for rule in self.rules:
-            actions.extend(rule.process_trade(trade, related_order))
+            if isinstance(rule, AccountVolumeLimitRule) and account_id and contract_id:
+                actions.extend(
+                    rule.on_trade_with_account(
+                        account_id=account_id,
+                        contract_id=contract_id,
+                        volume=trade.volume,
+                        timestamp_ns=trade.timestamp,
+                        ctx=ctx,
+                    )
+                )
+            else:
+                actions.extend(rule.on_trade(trade, ctx))
+        self._apply_side_effects(actions)
         return actions
 
-    # Hot update APIs
-    def update_volume_limit(self, *, threshold: Optional[int] = None, dimension: Optional[StatsDimension] = None, reset_daily: Optional[bool] = None) -> None:
-        if self._volume_rule is not None:
-            self._volume_rule.update_config(threshold=threshold, dimension=dimension, reset_daily=reset_daily)
-            if threshold is not None:
-                self.config.volume_limit.threshold = threshold
-            if dimension is not None:
-                self.config.volume_limit.dimension = dimension
-            if reset_daily is not None:
-                self.config.volume_limit.reset_daily = reset_daily
+    def tick(self, now_ns: Optional[int] = None) -> List[ActionEvent]:
+        now_ns = now_ns or time.time_ns()
+        actions: List[ActionEvent] = []
+        for rule in self.rules:
+            actions.extend(rule.on_tick(now_ns))
+        self._apply_side_effects(actions)
+        return actions
 
-    def update_order_rate_limit(self, *, threshold: Optional[int] = None, window_ns: Optional[int] = None, dimension: Optional[StatsDimension] = None) -> None:
-        if self._order_rate_rule is not None:
-            self._order_rate_rule.update_config(threshold=threshold, window_ns=window_ns, dimension=dimension)
-            if threshold is not None:
-                self.config.order_rate_limit.threshold = threshold
-            if window_ns is not None:
-                self.config.order_rate_limit.window_ns = window_ns
-            if dimension is not None:
-                self.config.order_rate_limit.dimension = dimension
-
-    # Simple persistence (snapshot/restore) focusing on volume rule state
-    def snapshot(self) -> dict:
-        data = {
-            "config": {
-                "contract_to_product": self.config.contract_to_product,
-            }
-        }
-        if self._volume_rule is not None:
-            data["volume_rule"] = self._volume_rule.snapshot_state()
-        return data
-
-    def restore(self, snapshot: dict) -> None:
-        if not snapshot:
-            return
-        mapping = snapshot.get("config", {}).get("contract_to_product")
-        if mapping:
-            self.product_resolver.set_mapping(mapping)
-            self.config.contract_to_product = dict(mapping)
-        if self._volume_rule is not None and "volume_rule" in snapshot:
-            self._volume_rule.restore_state(snapshot["volume_rule"])
+    def _apply_side_effects(self, actions: Iterable[ActionEvent]) -> None:
+        for a in actions:
+            if a.action.name.startswith("PAUSE_ORDER"):
+                self.account_paused_for_order[a.account_id] = True
+            elif a.action.name.startswith("RESUME_ORDER"):
+                self.account_paused_for_order[a.account_id] = False
+            elif a.action.name.startswith("PAUSE_TRADING"):
+                self.account_paused_for_trading[a.account_id] = True
+            elif a.action.name.startswith("RESUME_TRADING"):
+                self.account_paused_for_trading[a.account_id] = False

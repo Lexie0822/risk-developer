@@ -1,222 +1,215 @@
 from __future__ import annotations
 
-from collections import deque, defaultdict
+from abc import ABC, abstractmethod
+from collections import defaultdict, deque
 from dataclasses import dataclass
 from typing import Deque, Dict, Iterable, List, Optional, Tuple
 
-from .actions import Action, ActionType
-from .models import Order, Trade, ProductResolver
-from .stats import MultiDimCounter, StatsDimension
-
-
-Key = Tuple[str, ...]
-NS_PER_DAY = 86_400_000_000_000
+from .actions import Action, ActionEvent
+from .models import Order, Trade
 
 
 @dataclass(slots=True)
 class RuleContext:
-    product_resolver: ProductResolver
+    # Mapping from contract_id to its product_id, e.g., {"T2303": "T10Y"}
+    contract_to_product: Dict[str, str]
 
 
-class BaseRule:
-    def process_order(self, order: Order) -> List[Action]:
-        return []
+class BaseRule(ABC):
+    @abstractmethod
+    def on_order(self, order: Order, ctx: RuleContext) -> Iterable[ActionEvent]:
+        ...
 
-    def process_trade(self, trade: Trade, related_order: Optional[Order]) -> List[Action]:
-        return []
+    @abstractmethod
+    def on_trade(self, trade: Trade, ctx: RuleContext) -> Iterable[ActionEvent]:
+        ...
+
+    def on_tick(self, now_ns: int) -> Iterable[ActionEvent]:
+        return ()
 
 
-class VolumeLimitRule(BaseRule):
-    """Suspend trading for an account if traded volume exceeds threshold.
+class SlidingCounter:
+    """Lock-free sliding window counter aggregated in fixed buckets.
 
-    Supports dimensions ACCOUNT, CONTRACT, PRODUCT. Counting happens on trades
-    because they represent executed risk.
+    Using a deque of (bucket_start_ns, count). Bucket size is configurable.
+    Eviction runs amortized O(1) per add.
     """
 
-    def __init__(
-        self,
-        threshold: int,
-        dimension: StatsDimension,
-        context: RuleContext,
-        *,
-        reset_daily: bool = True,
-    ) -> None:
-        self.threshold = threshold
-        self.dimension = dimension
-        self.context = context
-        self.reset_daily = reset_daily
-        self.counters = MultiDimCounter()
-        self.suspended_keys: set[Key] = set()
-        self._last_reset_day: Optional[int] = None
+    __slots__ = ("window_ns", "bucket_ns", "buckets", "total")
 
-    def _make_key(self, order: Optional[Order], trade: Trade) -> Key:
-        # Try to use information from order if provided (for account_id, contract)
-        if order is None:
-            # Without order context, we cannot know account or contract safely.
-            # In real systems, trade carries them; here we fallback to empty key.
-            return ("unknown",)
-        account_id = order.account_id
-        if self.dimension == StatsDimension.ACCOUNT:
-            return (account_id,)
-        if self.dimension == StatsDimension.CONTRACT:
-            return (account_id, order.contract_id)
-        if self.dimension == StatsDimension.PRODUCT:
-            product_id = self.context.product_resolver.resolve_product(order.contract_id) or "unknown"
-            return (account_id, product_id)
-        return (account_id,)
+    def __init__(self, window_ns: int, bucket_ns: int = 1_000_000):
+        if bucket_ns <= 0 or window_ns <= 0:
+            raise ValueError("bucket_ns and window_ns must be positive")
+        self.window_ns = window_ns
+        self.bucket_ns = bucket_ns
+        self.buckets: Deque[Tuple[int, int]] = deque()
+        self.total = 0
 
-    def _maybe_daily_reset(self, now_ns: int) -> None:
-        if not self.reset_daily:
-            return
-        current_day = now_ns // NS_PER_DAY
-        if self._last_reset_day is None:
-            self._last_reset_day = current_day
-            return
-        if current_day != self._last_reset_day:
-            # New UTC day: reset counters and suspensions
-            self.counters = MultiDimCounter()
-            self.suspended_keys.clear()
-            self._last_reset_day = current_day
+    def _bucketize(self, ts_ns: int) -> int:
+        return ts_ns - (ts_ns % self.bucket_ns)
 
-    def process_trade(self, trade: Trade, related_order: Optional[Order]) -> List[Action]:
-        actions: List[Action] = []
-        self._maybe_daily_reset(trade.timestamp)
-        key = self._make_key(related_order, trade)
-        new_value = self.counters.add(key, trade.volume)
-        if new_value > self.threshold and key not in self.suspended_keys:
-            self.suspended_keys.add(key)
-            account_id = related_order.account_id if related_order else "unknown"
-            actions.append(
-                Action(
-                    type=ActionType.SUSPEND_ACCOUNT_TRADING,
-                    account_id=account_id,
-                    reason=f"Volume limit exceeded: {new_value} > {self.threshold} on {self.dimension.value}",
-                    metadata={"key": key},
-                )
-            )
-        return actions
+    def _evict(self, now_ns: int) -> None:
+        threshold = now_ns - self.window_ns
+        while self.buckets and self.buckets[0][0] <= threshold:
+            _, count = self.buckets.popleft()
+            self.total -= count
 
-    # Hot update and persistence helpers
-    def update_config(
-        self,
-        *,
-        threshold: Optional[int] = None,
-        dimension: Optional[StatsDimension] = None,
-        reset_daily: Optional[bool] = None,
-    ) -> None:
-        if threshold is not None:
-            self.threshold = threshold
-        if dimension is not None:
-            self.dimension = dimension
-        if reset_daily is not None:
-            self.reset_daily = reset_daily
+    def add(self, ts_ns: int, n: int = 1) -> int:
+        b = self._bucketize(ts_ns)
+        if self.buckets and self.buckets[-1][0] == b:
+            last_bucket, last_count = self.buckets[-1]
+            self.buckets[-1] = (last_bucket, last_count + n)
+        else:
+            self.buckets.append((b, n))
+        self.total += n
+        self._evict(ts_ns)
+        return self.total
 
-    def snapshot_state(self) -> dict:
-        return {
-            "threshold": self.threshold,
-            "dimension": self.dimension.value,
-            "reset_daily": self.reset_daily,
-            "counters": list((list(k), v) for k, v in self.counters.items()),
-            "suspended_keys": [list(k) for k in self.suspended_keys],
-            "last_reset_day": self._last_reset_day,
-        }
-
-    def restore_state(self, state: dict) -> None:
-        # Threshold/dimension/reset_daily are also restored for completeness
-        if "threshold" in state:
-            self.threshold = int(state["threshold"])
-        if "dimension" in state:
-            self.dimension = StatsDimension(state["dimension"])
-        if "reset_daily" in state:
-            self.reset_daily = bool(state["reset_daily"])
-        # Rebuild counters and suspensions
-        self.counters = MultiDimCounter()
-        for k_list, v in state.get("counters", []):
-            self.counters.add(tuple(k_list), int(v))
-        self.suspended_keys = set(tuple(k) for k in state.get("suspended_keys", []))
-        self._last_reset_day = state.get("last_reset_day")
+    def current(self, now_ns: int) -> int:
+        self._evict(now_ns)
+        return self.total
 
 
 class OrderRateLimitRule(BaseRule):
-    """Suspend ordering if order submissions exceed threshold per time window.
+    """Rate limit number of order submissions per account in a time window.
 
-    Uses a per-key sliding window with lock-free deques. Auto-resume when rate
-    falls back below the configured threshold.
+    - threshold_per_account: default threshold
+    - window_ns: sliding window size
+    - dynamic_thresholds: optional account-specific overrides
+    - pause_action: PAUSE_ORDER by default
+    - resume_action: RESUME_ORDER by default
     """
 
     def __init__(
         self,
-        threshold: int,
+        *,
+        threshold_per_account: int,
         window_ns: int,
-        dimension: StatsDimension,
-        context: RuleContext,
+        bucket_ns: int = 1_000_000,
+        dynamic_thresholds: Optional[Dict[str, int]] = None,
+        pause_action: Action = Action.PAUSE_ORDER,
+        resume_action: Action = Action.RESUME_ORDER,
     ) -> None:
-        self.threshold = threshold
+        self.threshold_default = threshold_per_account
         self.window_ns = window_ns
-        self.dimension = dimension
-        self.context = context
-        self.events: Dict[Key, Deque[int]] = defaultdict(deque)
-        self.suspended: Dict[Key, bool] = {}
+        self.bucket_ns = bucket_ns
+        self.dynamic_thresholds = dynamic_thresholds or {}
+        self.pause_action = pause_action
+        self.resume_action = resume_action
+        self.counters: Dict[str, SlidingCounter] = {}
+        self.paused_accounts: Dict[str, bool] = defaultdict(bool)
 
-    def _make_key(self, order: Order) -> Key:
-        account_id = order.account_id
-        if self.dimension == StatsDimension.ACCOUNT:
-            return (account_id,)
-        if self.dimension == StatsDimension.CONTRACT:
-            return (account_id, order.contract_id)
-        if self.dimension == StatsDimension.PRODUCT:
-            product_id = self.context.product_resolver.resolve_product(order.contract_id) or "unknown"
-            return (account_id, product_id)
-        return (account_id,)
+    def _counter(self, account_id: str) -> SlidingCounter:
+        c = self.counters.get(account_id)
+        if c is None:
+            c = SlidingCounter(self.window_ns, self.bucket_ns)
+            self.counters[account_id] = c
+        return c
 
-    def _evict_old(self, key: Key, now_ns: int) -> None:
-        dq = self.events[key]
-        boundary = now_ns - self.window_ns
-        while dq and dq[0] <= boundary:
-            dq.popleft()
+    def _threshold(self, account_id: str) -> int:
+        return self.dynamic_thresholds.get(account_id, self.threshold_default)
 
-    def process_order(self, order: Order) -> List[Action]:
-        actions: List[Action] = []
-        key = self._make_key(order)
-        now_ns = order.timestamp
-        dq = self.events[key]
-        dq.append(now_ns)
-        self._evict_old(key, now_ns)
-        count = len(dq)
-
-        is_suspended = self.suspended.get(key, False)
-        if count > self.threshold and not is_suspended:
-            self.suspended[key] = True
-            actions.append(
-                Action(
-                    type=ActionType.SUSPEND_ORDERING,
-                    account_id=order.account_id,
-                    reason=f"Order rate {count}/{self.window_ns}ns exceeds {self.threshold}",
-                    metadata={"key": key, "count": count},
-                )
+    def on_order(self, order: Order, ctx: RuleContext) -> Iterable[ActionEvent]:
+        counter = self._counter(order.account_id)
+        current = counter.add(order.timestamp, 1)
+        threshold = self._threshold(order.account_id)
+        is_paused = self.paused_accounts[order.account_id]
+        if current > threshold and not is_paused:
+            self.paused_accounts[order.account_id] = True
+            yield ActionEvent(
+                timestamp_ns=order.timestamp,
+                account_id=order.account_id,
+                action=self.pause_action,
+                reason=f"order_rate>{threshold} in {self.window_ns}ns",
             )
-        elif count <= self.threshold and is_suspended:
-            self.suspended[key] = False
-            actions.append(
-                Action(
-                    type=ActionType.RESUME_ORDERING,
-                    account_id=order.account_id,
-                    reason=f"Order rate normalized to {count}/{self.window_ns}ns",
-                    metadata={"key": key, "count": count},
-                )
+        elif is_paused and current <= threshold:
+            self.paused_accounts[order.account_id] = False
+            yield ActionEvent(
+                timestamp_ns=order.timestamp,
+                account_id=order.account_id,
+                action=self.resume_action,
+                reason="order_rate back under threshold",
             )
-        return actions
 
-    def update_config(
+    def on_trade(self, trade: Trade, ctx: RuleContext) -> Iterable[ActionEvent]:
+        return ()
+
+    def on_tick(self, now_ns: int) -> Iterable[ActionEvent]:
+        # Periodic resume checks when there are no incoming orders
+        for account_id, counter in self.counters.items():
+            if self.paused_accounts.get(account_id) and counter.current(now_ns) <= self._threshold(account_id):
+                self.paused_accounts[account_id] = False
+                yield ActionEvent(
+                    timestamp_ns=now_ns,
+                    account_id=account_id,
+                    action=self.resume_action,
+                    reason="timed resume: order_rate back under threshold",
+                )
+
+
+class AccountVolumeLimitRule(BaseRule):
+    """Daily trade volume cap per account with optional dimensions.
+
+    dimensions: one or more of {"account", "contract", "product"}.
+    If "product" is used, contract_to_product mapping from context is required.
+    When cap is exceeded, PAUSE_TRADING is emitted for the specific dimension
+    (e.g., one product) and remains until manually reset (not auto-resume).
+    """
+
+    def __init__(
         self,
         *,
-        threshold: Optional[int] = None,
-        window_ns: Optional[int] = None,
-        dimension: Optional[StatsDimension] = None,
+        daily_cap: int,
+        dimensions: Tuple[str, ...] = ("account",),
     ) -> None:
-        if threshold is not None:
-            self.threshold = threshold
-        if window_ns is not None:
-            self.window_ns = window_ns
-        if dimension is not None:
-            self.dimension = dimension
+        self.daily_cap = daily_cap
+        self.dimensions = dimensions
+        self.volume_by_key: Dict[Tuple[str, ...], int] = defaultdict(int)
+        self.paused_keys: Dict[Tuple[str, ...], bool] = defaultdict(bool)
+
+    def _key(self, account_id: str, contract_id: Optional[str], ctx: RuleContext) -> Tuple[str, ...]:
+        parts: List[str] = []
+        for d in self.dimensions:
+            if d == "account":
+                parts.append(account_id)
+            elif d == "contract":
+                parts.append(contract_id or "*")
+            elif d == "product":
+                if not contract_id:
+                    parts.append("*")
+                else:
+                    parts.append(ctx.contract_to_product.get(contract_id, "?"))
+            else:
+                parts.append("?")
+        return tuple(parts)
+
+    def on_order(self, order: Order, ctx: RuleContext) -> Iterable[ActionEvent]:
+        return ()
+
+    def on_trade(self, trade: Trade, ctx: RuleContext) -> Iterable[ActionEvent]:
+        # We cannot access account_id from Trade directly; assume trade refers to order account elsewhere.
+        # The engine will enrich with account_id when dispatching this rule.
+        return ()  # Engine-driven update
+
+    # Public API for engine to apply trade impact with enriched info
+    def on_trade_with_account(
+        self, *, account_id: str, contract_id: str, volume: int, timestamp_ns: int, ctx: RuleContext
+    ) -> Iterable[ActionEvent]:
+        key = self._key(account_id, contract_id, ctx)
+        new_total = self.volume_by_key[key] + volume
+        self.volume_by_key[key] = new_total
+        if new_total > self.daily_cap and not self.paused_keys[key]:
+            self.paused_keys[key] = True
+            product_id = ctx.contract_to_product.get(contract_id)
+            yield ActionEvent(
+                timestamp_ns=timestamp_ns,
+                account_id=account_id,
+                action=Action.PAUSE_TRADING,
+                reason=f"daily_volume>{self.daily_cap}",
+                contract_id=contract_id,
+                product_id=product_id,
+            )
+
+    def reset_daily(self) -> None:
+        self.volume_by_key.clear()
+        self.paused_keys.clear()

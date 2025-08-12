@@ -18,7 +18,7 @@ class Order:
     direction: Direction
     price: float
     volume: int
-    timestamp: int  # nanoseconds since epoch
+    timestamp: int  # nanoseconds
 
 
 @dataclass(slots=True)
@@ -27,7 +27,7 @@ class Trade:
     oid: int
     price: float
     volume: int
-    timestamp: int  # nanoseconds since epoch
+    timestamp: int  # nanoseconds
 
 
 @dataclass(slots=True)
