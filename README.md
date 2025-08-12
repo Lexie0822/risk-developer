@@ -106,7 +106,7 @@ engine.restore(snap)
 - `risk_engine/rules.py`：规则实现（成交/金额/报单量限制、报单频控）
 - `risk_engine/engine.py`：引擎装配、事件入口、动作去抖、热更新与快照
 - `risk_engine/config.py`、`risk_engine/stats.py`：老接口兼容
-- `tests/`：单元测试（已全绿）
+- `tests/`：单元测试
 - `bench.py`：吞吐评估脚本（本机环境下运行）
 
 ## 基准与性能说明
