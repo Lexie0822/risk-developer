@@ -7,7 +7,7 @@ from .actions import Action
 from .metrics import MetricType
 from .dimensions import InstrumentCatalog, make_dimension_key
 from .state import MultiDimDailyCounter, RollingWindowCounter
-from .models import Order, Trade
+from .models import Order, Trade, Cancel
 from .state import _ns_to_day_id
 
 
@@ -37,6 +37,10 @@ class Rule:
         return None
 
     def on_trade(self, ctx: RuleContext, trade: Trade) -> Optional[RuleResult]:
+        return None
+    
+    def on_cancel(self, ctx: RuleContext, cancel) -> Optional[RuleResult]:
+        """处理撤单事件（可选实现）"""
         return None
 
 
@@ -85,6 +89,18 @@ class AccountTradeMetricLimitRule(Rule):
             account_group_id=trade.account_group_id if self.by_account_group else None,
         )
 
+    def _make_key_for_cancel(self, ctx: RuleContext, cancel: Cancel):
+        product_id = None
+        if self.by_product and cancel.contract_id is not None:
+            product_id = ctx.catalog.contract_to_product.get(cancel.contract_id)
+        return make_dimension_key(
+            account_id=cancel.account_id if self.by_account else None,
+            contract_id=cancel.contract_id if self.by_contract else None,
+            product_id=product_id,
+            exchange_id=cancel.exchange_id if self.by_exchange else None,
+            account_group_id=cancel.account_group_id if self.by_account_group else None,
+        )
+
     def on_order(self, ctx: RuleContext, order: Order) -> Optional[RuleResult]:
         # 若监控报单量，则累加并判断
         if self.metric == MetricType.ORDER_COUNT:
@@ -130,6 +146,17 @@ class AccountTradeMetricLimitRule(Rule):
             return RuleResult(actions=list(self.actions), reasons=[
                 f"{self.metric} 达到阈值: {new_value} >= {self.threshold}",
             ])
+        return None
+
+    def on_cancel(self, ctx: RuleContext, cancel: Cancel) -> Optional[RuleResult]:
+        # 若监控撤单量，则累加并判断
+        if self.metric == MetricType.CANCEL_COUNT:
+            key = self._make_key_for_cancel(ctx, cancel)
+            new_value = ctx.daily_counter.add(key, MetricType.CANCEL_COUNT, float(cancel.volume), cancel.timestamp)
+            if new_value >= self.threshold:
+                return RuleResult(actions=list(self.actions), reasons=[
+                    f"撤单量达到阈值: {new_value} >= {self.threshold}",
+                ])
         return None
 
 
