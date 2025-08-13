@@ -1,0 +1,16 @@
+# 金融风控系统依赖包
+# 核心依赖
+typing-extensions>=4.0.0
+
+# 测试依赖
+pytest>=7.0.0
+pytest-cov>=4.0.0
+
+# 性能测试
+memory-profiler>=0.60.0
+
+# 可选：Cython加速（如果可用）
+# cython>=3.0.0
+
+# 可选：Rust加速（如果可用）
+# maturin>=1.0.0
