@@ -16,7 +16,7 @@
 - 动态配置：
   - 规则集合支持原子更新；报单限流窗口大小变化自动重建窗口。
 
-## 快速开始
+## 运行方式
 ```bash
 python -m unittest discover -s tests -p 'test_*.py' | cat
 ```
