@@ -41,7 +41,7 @@ def main() -> None:
     # Show actions from rate limit
     print("Rate-limit actions:")
     for act in actions:
-        print("  ", act.short())
+        print(f"  {act.type.name}: {act.reason} (account: {act.account_id})")
 
     # Trades to exceed volume limit
     actions2 = []
@@ -60,7 +60,7 @@ def main() -> None:
 
     print("\nVolume-limit actions:")
     for act in actions2:
-        print("  ", act.short())
+        print(f"  {act.type.name}: {act.reason} (account: {act.account_id})")
 
 
 if __name__ == "__main__":

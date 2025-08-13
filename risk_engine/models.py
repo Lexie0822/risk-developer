@@ -72,3 +72,19 @@ class ProductResolver:
 
     def resolve_product(self, contract_id: str) -> Optional[str]:
         return self._contract_to_product.get(contract_id)
+
+
+@dataclass(slots=True)
+class Cancel:
+    """撤单输入模型（纳秒级时间戳）。
+    
+    - 用于支持撤单量统计的扩展功能。
+    """
+    
+    cid: int  # 撤单唯一标识符
+    oid: int  # 原订单ID
+    account_id: str
+    contract_id: str
+    timestamp: int  # 纳秒
+    exchange_id: Optional[str] = None
+    account_group_id: Optional[str] = None

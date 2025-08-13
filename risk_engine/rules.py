@@ -7,7 +7,7 @@ from .actions import Action
 from .metrics import MetricType
 from .dimensions import InstrumentCatalog, make_dimension_key
 from .state import MultiDimDailyCounter, RollingWindowCounter
-from .models import Order, Trade
+from .models import Order, Trade, Cancel
 from .state import _ns_to_day_id
 
 
@@ -37,6 +37,9 @@ class Rule:
         return None
 
     def on_trade(self, ctx: RuleContext, trade: Trade) -> Optional[RuleResult]:
+        return None
+
+    def on_cancel(self, ctx: RuleContext, cancel: Cancel) -> Optional[RuleResult]:
         return None
 
 
@@ -125,6 +128,29 @@ class AccountTradeMetricLimitRule(Rule):
             # 正常路径：多维日累加器
             key = self._make_key_for_trade(ctx, trade)
             new_value = ctx.daily_counter.add(key, self.metric, value, trade.timestamp)
+
+        if new_value >= self.threshold:
+            return RuleResult(actions=list(self.actions), reasons=[
+                f"{self.metric} 达到阈值: {new_value} >= {self.threshold}",
+            ])
+        return None
+
+    def on_cancel(self, ctx: RuleContext, cancel: Cancel) -> Optional[RuleResult]:
+        # 支持撤单量统计
+        if self.metric != MetricType.CANCEL_COUNT:
+            return None
+
+        value = 1.0  # 每笔撤单计数为1
+
+        # 构造统计键
+        key = make_dimension_key(
+            account_id=cancel.account_id if self.by_account else None,
+            contract_id=cancel.contract_id if self.by_contract else None,
+            product_id=ctx.catalog.contract_to_product.get(cancel.contract_id) if self.by_product and cancel.contract_id else None,
+            exchange_id=cancel.exchange_id if self.by_exchange else None,
+            account_group_id=cancel.account_group_id if self.by_account_group else None,
+        )
+        new_value = ctx.daily_counter.add(key, self.metric, value, cancel.timestamp)
 
         if new_value >= self.threshold:
             return RuleResult(actions=list(self.actions), reasons=[
