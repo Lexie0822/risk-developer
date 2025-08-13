@@ -1,0 +1,137 @@
+{
+  "rules": [
+    {
+      "rule_id": "account_daily_volume_limit",
+      "name": "账户日成交量限制",
+      "description": "当账户当日成交量超过1000手时，暂停该账户交易",
+      "enabled": true,
+      "priority": 100,
+      "metrics": [
+        {
+          "metric_type": "VOLUME",
+          "threshold": 1000,
+          "window_seconds": 86400,
+          "dimensions": ["account"],
+          "aggregation": "SUM"
+        }
+      ],
+      "actions": ["SUSPEND_ACCOUNT"],
+      "cooldown_seconds": 300,
+      "metadata": {
+        "risk_level": "HIGH",
+        "notification_required": true
+      }
+    },
+    {
+      "rule_id": "account_order_frequency_limit",
+      "name": "账户报单频率控制",
+      "description": "当账户每秒报单数超过50次时，暂停报单",
+      "enabled": true,
+      "priority": 90,
+      "metrics": [
+        {
+          "metric_type": "ORDER_COUNT",
+          "threshold": 50,
+          "window_seconds": 1,
+          "dimensions": ["account"],
+          "aggregation": "SUM"
+        }
+      ],
+      "actions": ["SUSPEND_ORDER"],
+      "cooldown_seconds": 60,
+      "metadata": {
+        "risk_level": "MEDIUM",
+        "auto_resume": true
+      }
+    },
+    {
+      "rule_id": "product_volume_warning",
+      "name": "产品成交量预警",
+      "description": "当产品小时成交量超过10000手时，发出预警",
+      "enabled": true,
+      "priority": 50,
+      "metrics": [
+        {
+          "metric_type": "VOLUME",
+          "threshold": 10000,
+          "window_seconds": 3600,
+          "dimensions": ["product"],
+          "aggregation": "SUM"
+        }
+      ],
+      "actions": ["WARNING"],
+      "cooldown_seconds": 600,
+      "metadata": {
+        "risk_level": "LOW",
+        "monitoring_only": true
+      }
+    },
+    {
+      "rule_id": "account_minute_order_limit",
+      "name": "账户分钟报单限制",
+      "description": "当账户每分钟报单数超过500次时，暂停报单",
+      "enabled": true,
+      "priority": 85,
+      "metrics": [
+        {
+          "metric_type": "ORDER_COUNT",
+          "threshold": 500,
+          "window_seconds": 60,
+          "dimensions": ["account"],
+          "aggregation": "SUM"
+        }
+      ],
+      "actions": ["SUSPEND_ORDER"],
+      "cooldown_seconds": 120,
+      "metadata": {
+        "risk_level": "MEDIUM"
+      }
+    },
+    {
+      "rule_id": "contract_hourly_volume_limit",
+      "name": "合约小时成交量限制",
+      "description": "当单个合约小时成交量超过50000手时，触发预警",
+      "enabled": true,
+      "priority": 60,
+      "metrics": [
+        {
+          "metric_type": "VOLUME",
+          "threshold": 50000,
+          "window_seconds": 3600,
+          "dimensions": ["contract"],
+          "aggregation": "SUM"
+        }
+      ],
+      "actions": ["WARNING"],
+      "cooldown_seconds": 1800,
+      "metadata": {
+        "risk_level": "MEDIUM",
+        "escalation_required": true
+      }
+    }
+  ],
+  "global_settings": {
+    "max_concurrent_orders": 10000,
+    "max_daily_trades": 500000,
+    "enable_pre_trade_check": true,
+    "enable_post_trade_check": true,
+    "metric_cleanup_interval_seconds": 300,
+    "performance_monitoring": {
+      "enabled": true,
+      "sample_rate": 0.1,
+      "latency_threshold_ms": 10,
+      "log_slow_operations": true
+    },
+    "risk_parameters": {
+      "max_position_value": 100000000,
+      "max_order_value": 10000000,
+      "concentration_limit": 0.2
+    },
+    "notification_settings": {
+      "email_enabled": false,
+      "email_recipients": ["risk-team@example.com"],
+      "webhook_enabled": false,
+      "webhook_url": "https://api.example.com/risk-alerts"
+    }
+  }
+}
