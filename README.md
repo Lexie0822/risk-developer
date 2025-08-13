@@ -2,7 +2,7 @@
 
 一个高性能的实时金融风控模块，专为高频交易场景设计，能够处理百万级/秒的订单和成交数据，并在微秒级时间内完成风控规则评估和处置指令生成。
 
-## 🚀 核心特性
+## 核心特性
 
 - **高并发**: 支持百万级/秒事件处理
 - **低延迟**: 微秒级响应时间
@@ -10,7 +10,7 @@
 - **多维统计**: 支持账户、合约、产品、交易所、账户组等维度
 - **实时监控**: 内置性能指标和监控
 
-## 🏗️ 系统架构
+## 系统架构
 
 ```
 risk_engine/
@@ -26,7 +26,7 @@ risk_engine/
 └── accel/                 # 加速模块
 ```
 
-## 📋 风控规则
+## 风控规则
 
 ### 1. 单账户成交量限制
 - 监控账户在指定时间窗口内的成交量
@@ -43,7 +43,7 @@ risk_engine/
 - 支持自定义风控逻辑
 - 插件化架构设计
 
-## 🚀 快速开始
+## 快速开始
 
 ### 安装依赖
 
@@ -112,7 +112,7 @@ async def main():
 asyncio.run(main())
 ```
 
-## 📊 性能测试
+## 性能测试
 
 运行性能基准测试：
 
@@ -129,7 +129,7 @@ python bench.py
 - **延迟**: P99 < 1,000 微秒
 - **并发**: 支持高并发事件处理
 
-## 📖 使用示例
+## 使用示例
 
 查看完整的使用示例：
 
@@ -143,7 +143,7 @@ python examples/basic_usage.py
 - 自定义规则开发
 - 动态配置更新
 
-## ⚙️ 配置说明
+## 配置说明
 
 ### 引擎配置
 
@@ -191,7 +191,7 @@ async_config = AsyncEngineConfig(
 )
 ```
 
-## 🔧 自定义规则
+## 自定义规则
 
 ### 创建自定义规则
 
@@ -217,7 +217,7 @@ class CustomRiskRule(Rule):
 engine.add_rule(CustomRiskRule("CUSTOM-RULE", 1000))
 ```
 
-## 📈 监控和统计
+## 监控和统计
 
 ### 获取性能统计
 
@@ -233,7 +233,7 @@ print(f"动作生成: {stats['actions_generated']:,}")
 print(f"平均延迟: {stats['avg_latency_ns']/1000:.2f} 微秒")
 ```
 
-## 🚀 部署建议
+## 部署建议
 
 ### 硬件配置
 - **CPU**: 建议16核以上，支持高频率
@@ -253,21 +253,21 @@ echo 'vm.swappiness = 1' >> /etc/sysctl.conf
 sysctl -p
 ```
 
-## 📚 文档
+## 文档
 
 - [系统文档](SYSTEM_DOCUMENTATION.md) - 详细的系统说明和使用指南
 - [API文档](risk_engine/) - 代码级别的API文档
 - [示例代码](examples/) - 完整的使用示例
 
-## 🤝 贡献
+## 贡献
 
 欢迎提交Issue和Pull Request来改进这个项目。
 
-## 📄 许可证
+## 许可证
 
 本项目采用MIT许可证。
 
-## 🔗 相关链接
+## 相关链接
 
 - [Python官方文档](https://docs.python.org/)
 - [asyncio文档](https://docs.python.org/3/library/asyncio.html)
