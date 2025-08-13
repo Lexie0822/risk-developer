@@ -7,7 +7,7 @@ from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 from .actions import Action
 from .dimensions import InstrumentCatalog
 from .metrics import MetricType
-from .models import Order, Trade
+from .models import Order, Trade, Cancel
 from .rules import (
     Rule,
     RuleContext,
@@ -172,6 +172,31 @@ class RiskEngine:
             if result and result.actions:
                 self._emit_actions(rule.rule_id, result.actions, result.reasons, subject=trade)
 
+    def on_cancel(self, cancel: Cancel) -> None:
+        # 尝试从订单补全缺失字段  
+        if (cancel.account_id is None or cancel.contract_id is None) and cancel.oid in self._oid_to_order:
+            o = self._oid_to_order[cancel.oid]
+            if cancel.account_id is None:
+                cancel.account_id = o.account_id
+            if cancel.contract_id is None:
+                cancel.contract_id = o.contract_id
+            if cancel.exchange_id is None:
+                cancel.exchange_id = o.exchange_id
+            if cancel.account_group_id is None:
+                cancel.account_group_id = o.account_group_id
+        
+        ctx = RuleContext(
+            catalog=self._catalog,
+            daily_counter=self._daily_counter,
+            order_rate_windows=self._order_rate_windows,
+            legacy_volume_state=self._legacy_volume_state,
+        )
+        rules_snapshot = self._rules
+        for rule in rules_snapshot:
+            result = rule.on_cancel(ctx, cancel)
+            if result and result.actions:
+                self._emit_actions(rule.rule_id, result.actions, result.reasons, subject=cancel)
+
     # ---------------------------- 事件入口（旧兼容） ----------------------------
     def ingest_order(self, order: Order) -> List[object]:
         """旧接口：返回动作列表的轻量对象，保留 .type.name 字段兼容测试。"""
@@ -182,6 +207,12 @@ class RiskEngine:
     def ingest_trade(self, trade: Trade) -> List[object]:
         self._last_emitted = []
         self.on_trade(trade)
+        return list(self._last_emitted)
+
+    def ingest_cancel(self, cancel: Cancel) -> List[object]:
+        """兼容接口：处理撤单事件并返回动作列表"""
+        self._last_emitted = []
+        self.on_cancel(cancel)
         return list(self._last_emitted)
 
     # ---------------------------- 动作处理 ----------------------------
@@ -227,7 +258,7 @@ class RiskEngine:
 
     def _collect_emitted(self, action: Action, subject: object) -> None:
         from .actions import EmittedAction
-        account_id = subject.account_id if isinstance(subject, (Order, Trade)) else None
+        account_id = subject.account_id if isinstance(subject, (Order, Trade, Cancel)) else None
         self._last_emitted.append(EmittedAction(type=action, account_id=account_id))
 
     # ---------------------------- 热更新/快照（旧测试需要） ----------------------------

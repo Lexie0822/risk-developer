@@ -49,6 +49,23 @@ class Trade:
 
 
 @dataclass(slots=True)
+class Cancel:
+    """撤单事件模型（纳秒级时间戳）。
+    
+    用于统计撤单量指标。
+    """
+    
+    cancel_id: int
+    oid: int  # 被撤订单ID
+    volume: int  # 撤单数量
+    timestamp: int  # 纳秒
+    account_id: Optional[str] = None
+    contract_id: Optional[str] = None
+    exchange_id: Optional[str] = None
+    account_group_id: Optional[str] = None
+
+
+@dataclass(slots=True)
 class ContractMetadata:
     contract_id: str
     product_id: str  # e.g. all T23xx belong to product "T"
