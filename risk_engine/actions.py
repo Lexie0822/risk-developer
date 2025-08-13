@@ -22,6 +22,18 @@ class Action(Enum):
 
     # 风险提示
     ALERT = auto()  # 告警，仅提示不强制拦截
+    
+    # 扩展处置动作
+    REDUCE_POSITION = auto()  # 强制减仓
+    INCREASE_MARGIN = auto()  # 要求追加保证金
+    SUSPEND_CONTRACT = auto()  # 暂停特定合约交易
+    RESUME_CONTRACT = auto()  # 恢复特定合约交易
+    SUSPEND_PRODUCT = auto()  # 暂停产品交易
+    RESUME_PRODUCT = auto()  # 恢复产品交易
+    SUSPEND_EXCHANGE = auto()  # 暂停交易所交易
+    RESUME_EXCHANGE = auto()  # 恢复交易所交易
+    SUSPEND_ACCOUNT_GROUP = auto()  # 暂停账户组交易
+    RESUME_ACCOUNT_GROUP = auto()  # 恢复账户组交易
 
 
 @dataclass(slots=True)
