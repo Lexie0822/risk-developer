@@ -27,6 +27,48 @@ risk_engine/
 └── accel/                 # 加速模块
 ```
 
+### 需求对照表（覆盖情况）
+
+- **单账户成交量限制（按日）**: 已实现
+  - 规则类: `AccountTradeMetricLimitRule`
+  - 指标: `MetricType.TRADE_VOLUME`（亦支持 `TRADE_NOTIONAL` 等扩展）
+  - 维度: 账户/合约/产品/交易所/账户组 按开关组合聚合
+  - 触发动作: 默认 `SUSPEND_ACCOUNT_TRADING`，可配置多个动作
+  - 验证: `tests/test_engine.py::test_trade_volume_limit`、`tests/test_rules_product.py::test_volume_limit_by_product`
+- **报单频率控制（滑动时间窗口）**: 已实现
+  - 规则类: `OrderRateLimitRule`
+  - 支持动态阈值与窗口调整（`RiskEngine.update_order_rate_limit`）
+  - 维度: 账户/合约/产品（`dimension="account|contract|product"`）
+  - 超阈触发暂停，回落自动恢复（去重抖动）
+  - 验证: `tests/test_engine.py::test_order_rate_limit_suspend_and_resume`、`tests/test_rules.py::test_order_rate_limit_trigger_and_resume`
+- **Action 枚举与多动作支持**: 已实现
+  - 动作: `actions.Action` 中提供 `SUSPEND_*/RESUME_*`、`BLOCK_*`、`ALERT` 等
+  - 多动作: 规则入参 `actions=(Action.SUSPEND_ACCOUNT_TRADING, Action.ALERT)`
+  - 去重: 引擎对 SUSPEND/RESUME 做状态去抖
+- **多维统计引擎（合约/产品/扩展维度）**: 已实现
+  - 存储: `MultiDimDailyCounter`（按日聚合，多维键）
+  - 维度键: `make_dimension_key` 支持账户/合约/产品/交易所/账户组
+  - 产品映射: `EngineConfig.contract_to_product` / `RiskEngineConfig.contract_to_product`
+  - 验证: `tests/test_rules_product.py`
+
+### 输入数据定义（与模型映射）
+
+- **Order**（纳秒级时间戳）
+  - `oid: int`（订单唯一ID）
+  - `account_id: str`（账户）
+  - `contract_id: str`（合约）
+  - `direction: Direction`（买卖方向 Bid/Ask）
+  - `price: float`（价格）
+  - `volume: int`（数量）
+  - `timestamp: int`（纳秒时间戳）
+  - `exchange_id: Optional[str]`（可选：交易所）
+  - `account_group_id: Optional[str]`（可选：账户组）
+- **Trade**（纳秒级时间戳）
+  - `tid: int`（成交唯一ID）
+  - `oid: int`（关联订单ID）
+  - `price: float`、`volume: int`、`timestamp: int`
+  - `account_id/contract_id` 可选（若缺失将由引擎基于 `oid` 自动补全）
+
 ## 风控规则
 
 ### 1. 单账户成交量限制
@@ -50,6 +92,9 @@ risk_engine/
 
 ```bash
 pip install -r requirements.txt
+# 若遇到 PEP 668 限制，可使用虚拟环境：
+# python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt
+# 若系统无 ensurepip（提示安装 python3-venv），可先安装系统包再创建虚拟环境。
 ```
 
 ### 基本使用
@@ -123,7 +168,6 @@ async def main():
     finally:
         await engine.stop()
 
-# 运行
 # asyncio.run(main())
 ```
 
@@ -132,10 +176,10 @@ async def main():
 运行性能基准测试：
 
 ```bash
-# 异步高性能测试
+# 异步高性能测试（可达百万级/秒，视硬件而定）
 python bench_async.py
 
-# 基本性能测试
+# 基本性能测试（单线程同步）
 python bench.py
 ```
 
@@ -157,6 +201,20 @@ python examples/basic_usage.py
 - 异步高性能引擎使用
 - 自定义规则开发
 - 动态配置更新
+
+## 验证指南（如何自证满足需求）
+
+- **单元测试（无需额外依赖）**
+  - 运行：`python3 -m unittest discover -s tests -p "test*.py" -q`
+  - 覆盖：成交量限制、频控暂停与恢复、产品维度聚合、热更新、状态快照/恢复
+- **功能演示**
+  - 运行：`python3 examples/basic_usage.py`
+  - 查看控制台输出的动作（SUSPEND/RESUME/BLOCK/ALERT 等）
+- **吞吐/延迟基准**
+  - 快速：`python3 bench.py`
+  - 大规模：`python3 bench_async.py`（如需更高吞吐，调整 `num_workers`/`batch_size`/`num_shards`）
+- **动态阈值/窗口验证**
+  - 运行测试 `tests/test_rules.py::test_hot_update`，或在运行中调用 `RiskEngine.update_order_rate_limit(...)`/`update_volume_limit(...)`
 
 ## 配置说明
 

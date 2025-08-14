@@ -124,7 +124,7 @@ class PerformanceBenchmark:
             stats = engine.get_stats()
             print(f"\n引擎统计:")
             print(f"订单处理: {stats['orders_processed']:,}")
-            print(f"成交处理: {stats['effective_trades_processed']:,}")
+            print(f"成交处理: {stats['trades_processed']:,}")
             print(f"动作生成: {stats['actions_generated']:,}")
             print(f"平均延迟: {stats['avg_latency_ns']/1000:.2f} 微秒")
             print(f"最大延迟: {stats['max_latency_ns']/1000:.2f} 微秒")
