@@ -423,7 +423,7 @@ def create_async_engine(config: RiskEngineConfig) -> AsyncRiskEngine:
         engine.add_rule(OrderRateLimitRule(
             rule_id="ORDER-RATE-LIMIT",
             threshold=config.order_rate_limit.threshold,
-            window_seconds=config.order_rate_limit.window_seconds,
+            window_seconds=max(1, config.order_rate_limit.get_window_ns() // 1_000_000_000),
             suspend_actions=(Action.SUSPEND_ORDERING,),
             resume_actions=(Action.RESUME_ORDERING,),
             dimension=config.order_rate_limit.dimension.value,

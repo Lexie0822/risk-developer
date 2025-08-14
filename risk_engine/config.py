@@ -31,7 +31,14 @@ class OrderRateLimitRuleConfig:
     """报单频率限制规则配置。"""
     threshold: int
     window_seconds: int = 1
+    window_ns: Optional[int] = None  # 支持纳秒级窗口，优先级高于 window_seconds
     dimension: StatsDimension = StatsDimension.ACCOUNT
+    
+    def get_window_ns(self) -> int:
+        """获取窗口大小（纳秒）。"""
+        if self.window_ns is not None:
+            return self.window_ns
+        return self.window_seconds * 1_000_000_000
 
 
 @dataclass
