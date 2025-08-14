@@ -237,9 +237,9 @@ class PerformanceBenchmark:
             
             # 验证微秒级延迟要求
             if p99_latency <= 1000:  # P99延迟 <= 1毫秒
-                print(f"✅ 微秒级延迟要求满足: P99 {p99_latency:.2f} 微秒 <= 1000 微秒")
+                print(f"微秒级延迟要求满足: P99 {p99_latency:.2f} 微秒 <= 1000 微秒")
             else:
-                print(f"❌ 微秒级延迟要求未满足: P99 {p99_latency:.2f} 微秒 > 1000 微秒")
+                print(f"微秒级延迟要求未满足: P99 {p99_latency:.2f} 微秒 > 1000 微秒")
             
             self.results['latency'] = latencies_us
             
@@ -320,18 +320,18 @@ class PerformanceBenchmark:
             throughput = self.results['throughput'][0]
             print(f"吞吐量: {throughput:,.0f} 事件/秒")
             if throughput >= 1_000_000:
-                print("✅ 高并发要求满足")
+                print("高并发要求满足")
             else:
-                print("❌ 高并发要求未满足")
+                print("高并发要求未满足")
         
         if 'latency' in self.results:
             latencies = self.results['latency']
             p99_latency = sorted(latencies)[int(len(latencies) * 0.99)]
             print(f"P99延迟: {p99_latency:.2f} 微秒")
             if p99_latency <= 1000:
-                print("✅ 低延迟要求满足")
+                print("低延迟要求满足")
             else:
-                print("❌ 低延迟要求未满足")
+                print("低延迟要求未满足")
 
 
 async def main():
