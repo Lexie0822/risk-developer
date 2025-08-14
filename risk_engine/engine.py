@@ -340,6 +340,16 @@ class RiskEngine:
                 restored[(day_id, dim_key)] = val
             self._legacy_volume_state = restored
 
+    def get_stats(self) -> dict:
+        """获取性能统计信息"""
+        return {
+            "orders_processed": len(self._oid_to_order),
+            "trades_processed": 0,  # 需要跟踪成交数量
+            "actions_generated": len(self._last_emitted),
+            "rules_count": len(self._rules),
+            "shards_count": 64,  # 默认分片数
+        }
+
 
 # 便捷构造函数
 
