@@ -3,7 +3,10 @@
 测试所有需求功能和扩展点
 """
 
-import pytest
+try:
+    import pytest  # optional, not required by unittest runner
+except Exception:
+    pytest = None
 import time
 from typing import List
 from risk_engine import RiskEngine
