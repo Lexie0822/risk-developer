@@ -120,10 +120,29 @@ class RiskEngine:
         # 默认打印，可由调用方替换为消息总线/回调
         print(f"[Action] {action.name} by {rule_id} -> {obj}")
 
-    def update_rules(self, new_rules: Sequence[Rule]) -> None:
-        """原子替换规则集合（读路径无锁）。"""
+    def update_rules(self, new_rules: List[Rule]) -> None:
+        """更新规则集合（原子操作）。"""
         with self._lock:
             self._rules = list(new_rules)
+
+    def add_rule(self, rule: Rule) -> None:
+        """添加新规则。"""
+        with self._lock:
+            self._rules.append(rule)
+
+    def remove_rule(self, rule_id: str) -> bool:
+        """移除指定规则。"""
+        with self._lock:
+            for i, r in enumerate(self._rules):
+                if getattr(r, 'rule_id', None) == rule_id:
+                    del self._rules[i]
+                    return True
+            return False
+
+    def get_rules(self) -> List[Rule]:
+        """获取当前规则列表的副本。"""
+        with self._lock:
+            return list(self._rules)
 
     # ---------------------------- 事件入口（新） ----------------------------
     def on_order(self, order: Order) -> None:
