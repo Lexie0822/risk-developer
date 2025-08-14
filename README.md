@@ -1,4 +1,6 @@
-# 金融风控模块系统 - 技术文档
+# 金融风控模块 - 使用与技术手册
+
+本单一文档同时覆盖“用户手册”和“技术文档”，包含系统概述、接口、配置、用法、测试与性能说明，便于笔试与交付查阅。
 
 ## 目录
 1. [系统概述](#系统概述)
@@ -11,6 +13,7 @@
 8. [性能验证](#性能验证)
 9. [系统优势](#系统优势)
 10. [系统局限](#系统局限)
+11. [故障排查与常见问题](#故障排查与常见问题)
 
 ## 系统概述
 
@@ -25,23 +28,23 @@
 
 ## 需求满足情况
 
-### 1. 单账户成交量限制 ✅
+### 1. 单账户成交量限制
 - **实现**: `VolumeLimitRule` 类
 - **功能**: 监控账户/产品在当日的成交量，超过阈值时暂停交易
 - **扩展点满足**:
-  - ✅ 支持多种指标: 成交量、成交金额、报单量、撤单量
-  - ✅ 支持多维度统计: 账户、合约、产品、交易所、账户组
-  - ✅ 可配置阈值和统计维度
+  - 支持多种指标: 成交量、成交金额、报单量、撤单量
+  - 支持多维度统计: 账户、合约、产品、交易所、账户组
+  - 可配置阈值和统计维度
 
-### 2. 报单频率控制 ✅
+### 2. 报单频率控制
 - **实现**: `OrderRateLimitRule` 类
 - **功能**: 监控账户在滑动时间窗口内的报单频率
 - **扩展点满足**:
-  - ✅ 支持动态调整阈值
-  - ✅ 支持动态调整时间窗口（秒级或纳秒级）
-  - ✅ 自动恢复功能
+  - 支持动态调整阈值
+  - 支持动态调整时间窗口（秒级或纳秒级）
+  - 自动恢复功能
 
-### 3. Action处置指令 ✅
+### 3. Action处置指令
 - **实现**: `Action` 枚举类和 `EmittedAction` 数据类
 - **支持的动作类型**:
   - 账户维度: 暂停/恢复账户交易
@@ -50,16 +53,16 @@
   - 产品维度: 暂停/恢复产品交易
   - 其他: 告警、强制减仓、追加保证金等
 - **扩展点满足**:
-  - ✅ 一个规则可关联多个Action
-  - ✅ Action类型可扩展
+  - 一个规则可关联多个Action
+  - Action类型可扩展
 
-### 4. 多维统计引擎 ✅
+### 4. 多维统计引擎
 - **实现**: `DimensionKey` 和 `InstrumentCatalog`
 - **功能**: 支持多维度的实时统计和聚合
 - **扩展点满足**:
-  - ✅ 支持合约维度和产品维度统计
-  - ✅ 易于新增统计维度
-  - ✅ O(1)时间复杂度的维度查询
+  - 支持合约维度和产品维度统计
+  - 易于新增统计维度
+  - O(1)时间复杂度的维度查询
 
 ## 系统架构
 
@@ -209,7 +212,7 @@ class StateManager:
 pip install -r requirements.txt
 ```
 
-### 2. 基本使用示例
+### 2. 基本使用示例（同步引擎）
 
 ```python
 from risk_engine import RiskEngine
@@ -323,7 +326,7 @@ class CustomPriceDeviationRule(Rule):
 engine.add_rule(CustomPriceDeviationRule("PRICE_CHECK", 0.05))
 ```
 
-### 3. 异步高性能引擎使用
+### 3. 异步高性能引擎使用（可选）
 
 ```python
 import asyncio
@@ -353,26 +356,15 @@ async def high_performance_example():
 
 ### 4. 动态配置更新
 
-```python
-# 运行时更新规则配置
-engine.update_rule_config("VOLUME_LIMIT", {
-    "threshold": 2000,  # 提高阈值到2000手
-    "metric": MetricType.TRADE_NOTIONAL  # 改为监控成交金额
-})
+当前同步引擎提供针对两类内置规则的运行时更新接口：
 
-# 添加新规则
-from risk_engine.config import DynamicRuleConfig
-new_rule = DynamicRuleConfig(
-    rule_id="CANCEL_RATE_LIMIT",
-    rule_type="order_rate_limit",
-    config={
-        "threshold": 10,
-        "window_seconds": 60,
-        "metric": MetricType.CANCEL_COUNT
-    },
-    actions=["SUSPEND_ORDERING", "ALERT"]
-)
-engine.add_dynamic_rule(new_rule)
+```python
+# 报单频控：阈值/窗口/维度
+engine.update_order_rate_limit(threshold=80, window_ns=1_000_000_000)
+
+# 成交量限制：阈值/维度
+from risk_engine.stats import StatsDimension
+engine.update_volume_limit(threshold=2000, dimension=StatsDimension.PRODUCT)
 ```
 
 ## 性能验证
@@ -441,8 +433,26 @@ python examples/benchmark.py --dimensions account,contract,product
 - 建议将复杂计算异步化或预计算
 
 ### 4. 持久化
-- 当前版本未包含持久化功能
-- 重启后需要重新加载状态
+- 当前版本未内置持久化（示例提供快照接口）
+- 可通过外部存储集成实现恢复
+
+## 故障排查与常见问题
+
+### 1. 延迟突然增加
+- 观察GC压力、锁竞争、规则复杂度
+- 建议：降低窗口、简化规则、开启异步模式
+
+### 2. 吞吐量下降
+- 检查CPU占用、IO阻塞、批处理参数
+- 建议：增大batch/线程数，减少日志
+
+### 3. 统计不生效
+- 核对`contract_to_product`映射
+- 确认时间戳为纳秒级
+
+### 4. 如何选择同步/异步引擎
+- 同步：实现简单、稳定
+- 异步：吞吐更高，适合高频场景
 
 ## 如何验证系统
 
