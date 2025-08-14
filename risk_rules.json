@@ -1,0 +1,83 @@
+{
+  "rules": [
+    {
+      "rule_id": "account_volume_limit_1000",
+      "rule_name": "账户日内成交量限制1000手",
+      "rule_type": "account_trading_volume",
+      "enabled": true,
+      "threshold": 1000,
+      "time_window": 86400,
+      "actions": [
+        "suspend_trading",
+        "alert"
+      ],
+      "metadata": {
+        "description": "限制单账户日内成交量不超过1000手",
+        "priority": "high"
+      }
+    },
+    {
+      "rule_id": "account_amount_limit_1000000",
+      "rule_name": "账户日内成交金额限制100万",
+      "rule_type": "account_trading_amount",
+      "enabled": true,
+      "threshold": 1000000,
+      "time_window": 86400,
+      "actions": [
+        "suspend_trading",
+        "alert"
+      ],
+      "metadata": {
+        "description": "限制单账户日内成交金额不超过100万",
+        "priority": "high"
+      }
+    },
+    {
+      "rule_id": "order_frequency_50_per_second",
+      "rule_name": "报单频率每秒50次限制",
+      "rule_type": "order_frequency",
+      "enabled": true,
+      "threshold": 50,
+      "time_window": 1,
+      "actions": [
+        "suspend_order",
+        "alert"
+      ],
+      "metadata": {
+        "description": "限制单账户每秒报单数不超过50次",
+        "priority": "medium"
+      }
+    },
+    {
+      "rule_id": "order_frequency_500_per_minute",
+      "rule_name": "报单频率每分钟500次限制",
+      "rule_type": "order_frequency",
+      "enabled": true,
+      "threshold": 500,
+      "time_window": 60,
+      "actions": [
+        "suspend_order",
+        "alert"
+      ],
+      "metadata": {
+        "description": "限制单账户每分钟报单数不超过500次",
+        "priority": "medium"
+      }
+    },
+    {
+      "rule_id": "contract_volume_limit_5000",
+      "rule_name": "合约成交量限制5000手",
+      "rule_type": "contract_position",
+      "enabled": false,
+      "threshold": 5000,
+      "time_window": 86400,
+      "actions": [
+        "alert"
+      ],
+      "metadata": {
+        "description": "监控单合约成交量，超过5000手时告警",
+        "priority": "low"
+      }
+    }
+  ]
+}
