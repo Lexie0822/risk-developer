@@ -103,7 +103,11 @@ class RiskEngine:
             rl = legacy.order_rate_limit
             # 维度：ACCOUNT/CONTRACT/PRODUCT -> 设置在规则上
             dim = rl.dimension.value
-            window_seconds = max(1, rl.window_ns // 1_000_000_000)
+            window_seconds = getattr(rl, 'window_ns', None)
+            if window_seconds is not None:
+                window_seconds = max(1, int(window_seconds) // 1_000_000_000)
+            else:
+                window_seconds = int(getattr(rl, 'window_seconds', 1))
             rules.append(
                 OrderRateLimitRule(
                     rule_id="LEGACY-ORDER-RATE",

@@ -32,6 +32,8 @@ class OrderRateLimitRuleConfig:
     threshold: int
     window_seconds: int = 1
     dimension: StatsDimension = StatsDimension.ACCOUNT
+    # 兼容旧参数：window_ns（纳秒窗口）。如果提供则覆盖 window_seconds。
+    window_ns: Optional[int] = None
 
 
 @dataclass

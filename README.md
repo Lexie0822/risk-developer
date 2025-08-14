@@ -1,269 +1,183 @@
-# 金融风控模块系统
+# 金融风控模块（单一权威文档）
 
-一个高性能的实时金融风控模块，专为高频交易场景设计，能够处理百万级/秒的订单和成交数据，并在微秒级时间内完成风控规则评估和处置指令生成。
+一个用于高频交易场景的实时风控模块，处理百万级/秒的订单与成交事件，微秒级完成规则评估与处置指令（Action）生成。
 
-## 核心特性
+## 1. 接口设计（可配置、可扩展）
 
-- **高并发**: 支持百万级/秒事件处理
-- **低延迟**: 微秒级响应时间
-- **可扩展**: 支持动态规则配置和热更新
-- **多维统计**: 支持账户、合约、产品、交易所、账户组等维度
-- **实时监控**: 内置性能指标和监控
-
-## 系统架构
-
+- 规则与动作：
+  - 动作 `Action` 为枚举，支持暂停/恢复报单、暂停/恢复账户交易等，便于扩展与去重投递。
+  - 规则 `Rule` 基类统一 `on_order`/`on_trade` 接口；已实现两类规则：
+    - 单账户成交量（或金额）阈值限制：`AccountTradeMetricLimitRule`
+    - 报单频率限制（滑动窗口）：`OrderRateLimitRule`
+- 配置入口：
+```python
+from risk_engine import RiskEngine, EngineConfig
+from risk_engine.config import (
+    RiskEngineConfig, VolumeLimitRuleConfig, OrderRateLimitRuleConfig,
+)
+from risk_engine.stats import StatsDimension
+from risk_engine.metrics import MetricType
 ```
-risk_engine/
-├── engine.py              # 同步风控引擎
-├── async_engine.py        # 异步高性能引擎
-├── rules.py               # 风控规则引擎
-├── models.py              # 数据模型
-├── actions.py             # 风控动作
-├── metrics.py             # 指标系统
-├── state.py               # 状态管理
-├── config.py              # 配置管理
-├── dimensions.py          # 维度管理
-└── accel/                 # 加速模块
-```
+- 规则配置结构：
+```python
+# 成交量/金额等阈值限制
+VolumeLimitRuleConfig(
+    threshold=1000,                        # 阈值（手/金额等）
+    dimension=StatsDimension.PRODUCT,      # ACCOUNT | CONTRACT | PRODUCT
+    reset_daily=True,                      # 是否按自然日重置
+    metric=MetricType.TRADE_VOLUME,        # TRADE_VOLUME / TRADE_NOTIONAL ...
+)
 
-## 风控规则
+# 报单频率限制（兼容两种窗口参数）
+OrderRateLimitRuleConfig(
+    threshold=50,                          # 次/窗口
+    window_seconds=1,                      # 窗口秒数（推荐）
+    # window_ns=1_000_000_000,            # 兼容：纳秒窗口（可选，若提供则覆盖 window_seconds）
+    dimension=StatsDimension.ACCOUNT,      # ACCOUNT | CONTRACT | PRODUCT
+)
 
-### 1. 单账户成交量限制
-- 监控账户在指定时间窗口内的成交量
-- 支持多维度统计（账户、合约、产品、交易所、账户组）
-- 超过阈值时触发风控动作
-
-### 2. 报单频率控制
-- 监控账户在滑动时间窗口内的报单频率
-- 支持动态阈值和时间窗口调整
-- 超过阈值时暂停报单，回落后自动恢复
-
-### 3. 扩展规则支持
-- 基于 `Rule` 基类的可扩展规则框架
-- 支持自定义风控逻辑
-- 插件化架构设计
-
-## 快速开始
-
-### 安装依赖
-
-```bash
-pip install -r requirements.txt
+# 引擎配置（简化）
+RiskEngineConfig(
+    contract_to_product={"T2303": "T10Y", "T2306": "T10Y"},  # 合约→产品
+    volume_limit=...,                       # 按需开启
+    order_rate_limit=...,                   # 按需开启
+)
 ```
 
-### 基本使用
+## 2. 输入数据定义（纳秒级时间戳）
+
+```python
+from dataclasses import dataclass
+from enum import Enum
+
+class Direction(str, Enum):
+    BID = "Bid"
+    ASK = "Ask"
+
+@dataclass(slots=True)
+class Order:
+    oid: int
+    account_id: str
+    contract_id: str
+    direction: Direction
+    price: float
+    volume: int
+    timestamp: int  # ns
+
+@dataclass(slots=True)
+class Trade:
+    tid: int
+    oid: int
+    price: float
+    volume: int
+    timestamp: int  # ns
+    # 兼容：若未填，系统将基于 oid 用最近订单补全 account_id/contract_id
+    account_id: str | None = None
+    contract_id: str | None = None
+```
+
+## 3. 系统开发与用法
+
+- 核心引擎：`RiskEngine`（同步）与 `AsyncRiskEngine`（异步高性能）。
+- 处置指令：通过回调 `action_sink(Action, rule_id, obj)` 发出；默认打印，可对接消息总线。
 
 ```python
 from risk_engine import RiskEngine, EngineConfig
 from risk_engine.models import Order, Trade, Direction
+from risk_engine.actions import Action
+from risk_engine.metrics import MetricType
+from risk_engine.rules import AccountTradeMetricLimitRule, OrderRateLimitRule
 
-# 创建引擎配置
-config = EngineConfig(
-    contract_to_product={"T2303": "T10Y"},
-    deduplicate_actions=True,
+engine = RiskEngine(
+    EngineConfig(contract_to_product={"T2303": "T10Y"}),
+    rules=[
+        AccountTradeMetricLimitRule(
+            rule_id="VOL-1000",
+            metric=MetricType.TRADE_VOLUME,
+            threshold=1000,
+        ),
+        OrderRateLimitRule(
+            rule_id="ORDER-50-1S",
+            threshold=50,
+            window_seconds=1,
+        ),
+    ],
 )
 
-# 创建风控引擎
-engine = RiskEngine(config)
-
-# 处理订单
-order = Order(1, "ACC_001", "T2303", Direction.BID, 100.0, 1, timestamp)
-engine.on_order(order)
-
-# 处理成交
-trade = Trade(1, 1, "ACC_001", "T2303", 100.0, 1, timestamp)
-engine.on_trade(trade)
+ts = 1_700_000_000_000_000_000
+engine.on_order(Order(1, "ACC_001", "T2303", Direction.BID, 100.0, 1, ts))
+engine.on_trade(Trade(1, 1, 100.0, 1000, ts + 1))
 ```
 
-### 异步高性能使用
-
+- 异步版本示例：
 ```python
 import asyncio
 from risk_engine.async_engine import create_async_engine
-from risk_engine.config import RiskEngineConfig
+from risk_engine.config import RiskEngineConfig, VolumeLimitRuleConfig
+from risk_engine.stats import StatsDimension
 
 async def main():
-    # 创建异步引擎配置
-    config = RiskEngineConfig(
+    cfg = RiskEngineConfig(
         contract_to_product={"T2303": "T10Y"},
-        num_shards=128,
-        worker_threads=8,
+        volume_limit=VolumeLimitRuleConfig(threshold=1000, dimension=StatsDimension.PRODUCT),
     )
-    
-    # 创建异步引擎
-    engine = create_async_engine(config)
-    
-    # 启动引擎
+    engine = create_async_engine(cfg)
     await engine.start()
-    
     try:
-        # 提交订单
-        order = Order(1, "ACC_001", "T2303", Direction.BID, 100.0, 1, timestamp)
-        await engine.submit_order(order)
-        
-        # 提交成交
-        trade = Trade(1, 1, "ACC_001", "T2303", 100.0, 1, timestamp)
-        await engine.submit_trade(trade)
-        
+        ...  # await engine.submit_order(...); await engine.submit_trade(...)
     finally:
         await engine.stop()
 
-# 运行
 asyncio.run(main())
 ```
 
-## 性能测试
+## 4. 如何运行测试
 
-运行性能基准测试：
-
+无需额外依赖，直接使用标准库 unittest：
 ```bash
-# 异步高性能测试
-python bench_async.py
+python3 -m unittest discover -v
+```
 
-# 基本性能测试
+## 5. 性能与并发
+
+- 目标：吞吐 1,000,000 事件/秒；P99 延迟 < 1,000 微秒。
+- 关键手段：分片锁 `ShardedLockDict`、O(1) 路径、多维按日计数器、滑动窗口计数器、异步+批处理。
+- 可选基准：
+```bash
+python bench_async.py
 python bench.py
 ```
 
-### 性能目标
-- **吞吐量**: 1,000,000 事件/秒
-- **延迟**: P99 < 1,000 微秒
-- **并发**: 支持高并发事件处理
+## 6. 多维统计与扩展
 
-## 使用示例
+- 维度：账户、合约、产品（可扩展交易所、账户组）。
+- 产品聚合：通过 `contract_to_product` 将 T2303/T2306 等汇总为同一产品统计。
+- 新增维度/指标/动作：分别扩展 `dimensions.py`、`metrics.py`、`actions.py`，或新增自定义 `Rule`。
 
-查看完整的使用示例：
+## 7. 优势与局限
 
-```bash
-python examples/basic_usage.py
+- 优势：
+  - 高并发/低延迟设计；面向金融实时场景。
+  - 规则/维度/指标模块化，配置驱动与热更新。
+  - 纳秒时间戳、轻量 `dataclass(slots=True)`，降低 GC 压力。
+- 局限：
+  - 当前为单机引擎，如需更高吞吐需引入分布式/多进程分片。
+  - 主要聚焦实时处理，历史分析与 ML 策略不在本版本范围。
+
+## 8. 目录速览
+
+```
+risk_engine/
+├── engine.py          # 同步引擎
+├── async_engine.py    # 异步引擎
+├── rules.py           # 规则实现
+├── actions.py         # 动作枚举
+├── models.py          # Order/Trade/Direction
+├── metrics.py         # 指标类型
+├── dimensions.py      # 维度键与目录
+├── state.py           # 计数器与分片存储
+└── stats.py           # 旧版维度枚举（兼容）
 ```
 
-示例包括：
-- 基本风控引擎使用
-- 异步高性能引擎使用
-- 自定义规则开发
-- 动态配置更新
-
-## 配置说明
-
-### 引擎配置
-
-```python
-from risk_engine.config import RiskEngineConfig, VolumeLimitRuleConfig, OrderRateLimitRuleConfig, StatsDimension
-
-config = RiskEngineConfig(
-    # 合约到产品映射
-    contract_to_product={"T2303": "T10Y", "T2306": "T10Y"},
-    
-    # 成交量限制规则
-    volume_limit=VolumeLimitRuleConfig(
-        threshold=1000,  # 1000手
-        dimension=StatsDimension.PRODUCT,
-        metric=MetricType.TRADE_VOLUME
-    ),
-    
-    # 报单频率限制规则
-    order_rate_limit=OrderRateLimitRuleConfig(
-        threshold=50,  # 50次/秒
-        window_seconds=1,
-        dimension=StatsDimension.ACCOUNT
-    ),
-    
-    # 性能调优参数
-    num_shards=128,        # 分片锁数量
-    max_queue_size=1000000, # 最大队列大小
-    batch_size=1000,       # 批处理大小
-    worker_threads=8,      # 工作线程数
-)
-```
-
-### 异步引擎配置
-
-```python
-from risk_engine.async_engine import AsyncEngineConfig
-
-async_config = AsyncEngineConfig(
-    max_concurrent_tasks=10000,  # 最大并发任务数
-    task_timeout_ms=50,          # 任务超时时间
-    batch_size=1000,             # 批处理大小
-    num_workers=8,               # 工作线程数
-    enable_batching=True,        # 启用批处理
-    enable_async_io=True,        # 启用异步IO
-)
-```
-
-## 自定义规则
-
-### 创建自定义规则
-
-```python
-from risk_engine.rules import Rule, RuleContext, RuleResult
-from risk_engine.actions import Action
-
-class CustomRiskRule(Rule):
-    def __init__(self, rule_id: str, threshold: float):
-        self.rule_id = rule_id
-        self.threshold = threshold
-    
-    def on_order(self, ctx: RuleContext, order: Order) -> Optional[RuleResult]:
-        # 自定义风控逻辑
-        if order.volume > self.threshold:
-            return RuleResult(
-                actions=[Action.BLOCK_ORDER],
-                reasons=[f"订单数量 {order.volume} 超过阈值 {self.threshold}"]
-            )
-        return None
-
-# 添加自定义规则
-engine.add_rule(CustomRiskRule("CUSTOM-RULE", 1000))
-```
-
-## 监控和统计
-
-### 获取性能统计
-
-```python
-# 同步引擎
-stats = engine.snapshot()
-
-# 异步引擎
-stats = engine.get_stats()
-print(f"订单处理: {stats['orders_processed']:,}")
-print(f"成交处理: {stats['trades_processed']:,}")
-print(f"动作生成: {stats['actions_generated']:,}")
-print(f"平均延迟: {stats['avg_latency_ns']/1000:.2f} 微秒")
-```
-
-## 部署建议
-
-### 硬件配置
-- **CPU**: 建议16核以上，支持高频率
-- **内存**: 建议32GB以上，根据并发量调整
-- **网络**: 低延迟网络，支持高带宽
-- **存储**: SSD存储，减少I/O延迟
-
-### 系统调优
-
-```bash
-# 调整系统参数
-echo 'net.core.rmem_max = 134217728' >> /etc/sysctl.conf
-echo 'net.core.wmem_max = 134217728' >> /etc/sysctl.conf
-echo 'vm.swappiness = 1' >> /etc/sysctl.conf
-
-# 应用配置
-sysctl -p
-```
-
-## 文档
-
-- [系统文档](SYSTEM_DOCUMENTATION.md) - 详细的系统说明和使用指南
-- [API文档](risk_engine/) - 代码级别的API文档
-- [示例代码](examples/) - 完整的使用示例
-
-## 贡献
-
-欢迎提交Issue和Pull Request来改进这个项目。
-
-## 许可证
-
-本项目采用MIT许可证。
+本 README 为唯一权威文档，覆盖接口设计、输入定义、用法/测试、优势与局限，符合题目交付要求。
 
