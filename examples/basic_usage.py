@@ -155,11 +155,11 @@ async def async_engine_example():
             trade = Trade(
                 tid=i + 1,
                 oid=i + 1,
-                account_id=f"ACC_{i % 10:03d}",
-                contract_id="T2303",
                 price=100.0 + (i % 100) * 0.01,
                 volume=random.randint(1, 100),
                 timestamp=base_ts + i * 1000 + 100,
+                account_id=f"ACC_{i % 10:03d}",
+                contract_id="T2303",
             )
             task = asyncio.create_task(engine.submit_trade(trade))
             trade_tasks.append(task)

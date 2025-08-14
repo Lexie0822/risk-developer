@@ -1,6 +1,8 @@
-# 金融风控模块系统
+# 金融风控模块系统（单一交付文档）
 
 一个高性能的实时金融风控模块，专为高频交易场景设计，能够处理百万级/秒的订单和成交数据，并在微秒级时间内完成风控规则评估和处置指令生成。
+
+本 README 即为唯一权威文档，包含接口设计、系统用法、优势与局限、以及示例与测试说明。项目内不再提供其它重复文档。
 
 ## 核心特性
 
@@ -56,6 +58,8 @@ pip install -r requirements.txt
 ```python
 from risk_engine import RiskEngine, EngineConfig
 from risk_engine.models import Order, Trade, Direction
+from risk_engine.actions import Action
+from risk_engine.metrics import MetricType
 
 # 创建引擎配置
 config = EngineConfig(
@@ -67,11 +71,20 @@ config = EngineConfig(
 engine = RiskEngine(config)
 
 # 处理订单
+timestamp = 1_700_000_000_000_000_000
 order = Order(1, "ACC_001", "T2303", Direction.BID, 100.0, 1, timestamp)
 engine.on_order(order)
 
-# 处理成交
-trade = Trade(1, 1, "ACC_001", "T2303", 100.0, 1, timestamp)
+# 处理成交（注意参数顺序与命名）
+trade = Trade(
+    tid=1,
+    oid=1,
+    price=100.0,
+    volume=1,
+    timestamp=timestamp,
+    account_id="ACC_001",
+    contract_id="T2303",
+)
 engine.on_trade(trade)
 ```
 
@@ -81,6 +94,7 @@ engine.on_trade(trade)
 import asyncio
 from risk_engine.async_engine import create_async_engine
 from risk_engine.config import RiskEngineConfig
+from risk_engine.models import Order, Trade, Direction
 
 async def main():
     # 创建异步引擎配置
@@ -98,18 +112,20 @@ async def main():
     
     try:
         # 提交订单
+        timestamp = 1_700_000_000_000_000_000
         order = Order(1, "ACC_001", "T2303", Direction.BID, 100.0, 1, timestamp)
         await engine.submit_order(order)
         
-        # 提交成交
-        trade = Trade(1, 1, "ACC_001", "T2303", 100.0, 1, timestamp)
+        # 提交成交（使用命名参数，避免歧义）
+        trade = Trade(tid=1, oid=1, price=100.0, volume=1, timestamp=timestamp,
+                      account_id="ACC_001", contract_id="T2303")
         await engine.submit_trade(trade)
         
     finally:
         await engine.stop()
 
 # 运行
-asyncio.run(main())
+# asyncio.run(main())
 ```
 
 ## 性能测试
@@ -149,6 +165,7 @@ python examples/basic_usage.py
 
 ```python
 from risk_engine.config import RiskEngineConfig, VolumeLimitRuleConfig, OrderRateLimitRuleConfig, StatsDimension
+from risk_engine.metrics import MetricType
 
 config = RiskEngineConfig(
     # 合约到产品映射
@@ -161,7 +178,7 @@ config = RiskEngineConfig(
         metric=MetricType.TRADE_VOLUME
     ),
     
-    # 报单频率限制规则
+    # 报单频率限制规则（支持 window_seconds 或 window_ns 二选一）
     order_rate_limit=OrderRateLimitRuleConfig(
         threshold=50,  # 50次/秒
         window_seconds=1,
@@ -176,7 +193,7 @@ config = RiskEngineConfig(
 )
 ```
 
-### 异步引擎配置
+### 异步引擎配置（可选）
 
 ```python
 from risk_engine.async_engine import AsyncEngineConfig
@@ -193,8 +210,6 @@ async_config = AsyncEngineConfig(
 
 ## 自定义规则
 
-### 创建自定义规则
-
 ```python
 from risk_engine.rules import Rule, RuleContext, RuleResult
 from risk_engine.actions import Action
@@ -205,7 +220,6 @@ class CustomRiskRule(Rule):
         self.threshold = threshold
     
     def on_order(self, ctx: RuleContext, order: Order) -> Optional[RuleResult]:
-        # 自定义风控逻辑
         if order.volume > self.threshold:
             return RuleResult(
                 actions=[Action.BLOCK_ORDER],
@@ -214,12 +228,10 @@ class CustomRiskRule(Rule):
         return None
 
 # 添加自定义规则
-engine.add_rule(CustomRiskRule("CUSTOM-RULE", 1000))
+# engine.add_rule(CustomRiskRule("CUSTOM-RULE", 1000))
 ```
 
 ## 监控和统计
-
-### 获取性能统计
 
 ```python
 # 同步引擎
@@ -233,37 +245,27 @@ print(f"动作生成: {stats['actions_generated']:,}")
 print(f"平均延迟: {stats['avg_latency_ns']/1000:.2f} 微秒")
 ```
 
-## 部署建议
+## 系统优势
 
-### 硬件配置
-- **CPU**: 建议16核以上，支持高频率
-- **内存**: 建议32GB以上，根据并发量调整
-- **网络**: 低延迟网络，支持高带宽
-- **存储**: SSD存储，减少I/O延迟
+- **分片锁架构**: 64-128个分片，减少锁竞争
+- **异步处理**: 支持高并发事件处理
+- **批处理优化**: 批量处理提高吞吐量
+- **内存优化**: 轻量级对象，减少GC压力
+- **可扩展性**: 规则、指标、动作可独立扩展，支持热更新
 
-### 系统调优
+## 系统局限
 
-```bash
-# 调整系统参数
-echo 'net.core.rmem_max = 134217728' >> /etc/sysctl.conf
-echo 'net.core.wmem_max = 134217728' >> /etc/sysctl.conf
-echo 'vm.swappiness = 1' >> /etc/sysctl.conf
+- **单机限制**: 当前设计为单机部署，如需更高性能需考虑分布式
+- **内存依赖**: 高并发场景下内存使用量较大
+- **规则复杂度**: 复杂规则可能影响性能
 
-# 应用配置
-sysctl -p
-```
+## 目录与代码
 
-## 文档
-
-- [系统文档](SYSTEM_DOCUMENTATION.md) - 详细的系统说明和使用指南
-- [API文档](risk_engine/) - 代码级别的API文档
-- [示例代码](examples/) - 完整的使用示例
-
-## 贡献
-
-欢迎提交Issue和Pull Request来改进这个项目。
+- 代码 API 位于 `risk_engine/` 包
+- 示例位于 `examples/`
+- 测试位于 `tests/`
 
 ## 许可证
 
-本项目采用MIT许可证。
+本项目采用 MIT 许可证。
 
