@@ -99,7 +99,7 @@
 ```
 订单/成交 → 引擎接收 → 规则评估 → 统计更新 → 动作生成 → 结果返回
     ↓           ↓           ↓           ↓           ↓
-  验证      并发控制    风险计算    状态同步    动作执行
+  验证      并发控制      风险计算      状态同步      动作执行
 ```
 
 ### 3. 关键设计
@@ -119,7 +119,7 @@ with self.locks[shard_id]:
 ```
 Producer → Queue → Worker Pool → Result Aggregator
    ↓         ↓          ↓              ↓
-批量提交  缓冲队列  并行处理      结果聚合
+批量提交   缓冲队列     并行处理          结果聚合
 ```
 
 #### 3.3 内存优化策略
@@ -551,7 +551,4 @@ python examples/stress_test.py --rate 2000000 --duration 300
 - 查看examples/目录下的更多示例
 - 参考tests/目录下的测试用例
 
-## 许可证
-
-本项目采用 MIT 许可证。
 
