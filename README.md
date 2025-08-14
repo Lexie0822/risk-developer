@@ -267,8 +267,3 @@ sysctl -p
 
 本项目采用MIT许可证。
 
-## 相关链接
-
-- [Python官方文档](https://docs.python.org/)
-- [asyncio文档](https://docs.python.org/3/library/asyncio.html)
-- [金融风控最佳实践](https://www.bis.org/publ/bcbs128.pdf)
