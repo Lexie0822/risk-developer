@@ -1,5 +1,4 @@
 # 核心依赖
-asyncio-compat>=0.1.2
 typing-extensions>=4.0.0
 
 # 性能优化
