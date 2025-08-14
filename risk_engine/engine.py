@@ -17,6 +17,7 @@ from .rules import (
 )
 from .state import MultiDimDailyCounter, ShardedLockDict
 from .config import RiskEngineConfig, VolumeLimitRuleConfig, OrderRateLimitRuleConfig
+from .config import StatsDimension as ConfigStatsDimension
 from .stats import StatsDimension
 
 
@@ -77,6 +78,15 @@ class RiskEngine:
         self._last_emitted: List[object] = []
         # 兼容旧版成交量日统计（仅用于测试断言）
         self._legacy_volume_state: Dict[Tuple[int, Tuple[str, ...]], float] = {}
+        # 运行统计（为测试与运维提供基础指标）
+        self._stats_lock = threading.Lock()
+        self._stats: Dict[str, int | float] = {
+            "orders_processed": 0,
+            "trades_processed": 0,
+            "actions_generated": 0,
+            "avg_latency_ns": 0.0,
+            "max_latency_ns": 0.0,
+        }
 
     def _rules_from_legacy_config(self, legacy: RiskEngineConfig) -> List[Rule]:
         rules: List[Rule] = []
@@ -145,7 +155,9 @@ class RiskEngine:
             return list(self._rules)
 
     # ---------------------------- 事件入口（新） ----------------------------
-    def on_order(self, order: Order) -> None:
+    def on_order(self, order: Order) -> List[object]:
+        # 为兼容部分调用场景，重置并在函数末尾返回本次事件产生的动作列表
+        self._last_emitted = []
         # 记录 order 以供 trade 关联
         self._oid_to_order[order.oid] = order
         ctx = RuleContext(
@@ -161,13 +173,21 @@ class RiskEngine:
             value=1.0,
             ns_ts=order.timestamp,
         )
+        # 统计
+        with self._stats_lock:
+            self._stats["orders_processed"] = int(self._stats["orders_processed"]) + 1
         rules_snapshot = self._rules
         for rule in rules_snapshot:
             result = rule.on_order(ctx, order)
             if result and result.actions:
-                self._emit_actions(rule.rule_id, result.actions, result.reasons, subject=order)
+                rid = getattr(rule, "rule_id", rule.__class__.__name__)
+                self._emit_actions(rid, result.actions, result.reasons, subject=order)
+        # 返回本次事件产生的动作集合（可能为空列表）
+        return list(self._last_emitted)
 
-    def on_trade(self, trade: Trade) -> None:
+    def on_trade(self, trade: Trade) -> List[object]:
+        # 为兼容部分调用场景，重置并在函数末尾返回本次事件产生的动作列表
+        self._last_emitted = []
         # 尝试从订单补全缺失字段
         if (trade.account_id is None or trade.contract_id is None) and trade.oid in self._oid_to_order:
             o = self._oid_to_order[trade.oid]
@@ -185,11 +205,16 @@ class RiskEngine:
             order_rate_windows=self._order_rate_windows,
             legacy_volume_state=self._legacy_volume_state,
         )
+        # 统计
+        with self._stats_lock:
+            self._stats["trades_processed"] = int(self._stats["trades_processed"]) + 1
         rules_snapshot = self._rules
         for rule in rules_snapshot:
             result = rule.on_trade(ctx, trade)
             if result and result.actions:
-                self._emit_actions(rule.rule_id, result.actions, result.reasons, subject=trade)
+                rid = getattr(rule, "rule_id", rule.__class__.__name__)
+                self._emit_actions(rid, result.actions, result.reasons, subject=trade)
+        return list(self._last_emitted)
 
     # ---------------------------- 事件入口（旧兼容） ----------------------------
     def ingest_order(self, order: Order) -> List[object]:
@@ -248,6 +273,8 @@ class RiskEngine:
         from .actions import EmittedAction
         account_id = subject.account_id if isinstance(subject, (Order, Trade)) else None
         self._last_emitted.append(EmittedAction(type=action, account_id=account_id))
+        with self._stats_lock:
+            self._stats["actions_generated"] = int(self._stats["actions_generated"]) + 1
 
     # ---------------------------- 热更新/快照（旧测试需要） ----------------------------
     def update_order_rate_limit(self, *, threshold: Optional[int] = None, window_ns: Optional[int] = None, dimension: Optional[StatsDimension] = None) -> None:
@@ -339,6 +366,11 @@ class RiskEngine:
                 val = float(item["value"])  # type: ignore[index]
                 restored[(day_id, dim_key)] = val
             self._legacy_volume_state = restored
+
+    def get_stats(self) -> Dict[str, int | float]:
+        """返回当前基础运行统计的副本。"""
+        with self._stats_lock:
+            return dict(self._stats)
 
 
 # 便捷构造函数
