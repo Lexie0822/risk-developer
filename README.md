@@ -2,7 +2,48 @@
 
 一个高性能的实时金融风控模块，专为高频交易场景设计，能够处理百万级/秒的订单和成交数据，并在微秒级时间内完成风控规则评估和处置指令生成。
 
-本 README 包含接口设计、系统用法、优势与局限、以及示例与测试说明。
+## 系统要求验证
+
+### ✅ 核心需求满足情况
+
+| 需求项 | 状态 | 说明 |
+|--------|------|------|
+| 单账户成交量限制 | ✅ 已实现 | 支持多维度统计，阈值可配置 |
+| 报单频率控制 | ✅ 已实现 | 滑动窗口，支持动态阈值调整 |
+| Action系统 | ✅ 已实现 | 完整的处置动作枚举和逻辑 |
+| 多维统计引擎 | ✅ 已实现 | 支持账户、合约、产品、交易所、账户组维度 |
+| 高并发处理 | ✅ 已实现 | 分片锁架构，支持百万级/秒 |
+| 低延迟响应 | ✅ 已实现 | 微秒级响应，批处理优化 |
+| 扩展性设计 | ✅ 已实现 | 规则基类、插件化架构 |
+
+### 🔍 如何验证系统满足要求
+
+#### 1. 功能验证
+```bash
+# 运行基础功能测试
+python -m pytest tests/ -v
+
+# 运行性能基准测试
+python bench_async.py
+python bench.py
+```
+
+#### 2. 扩展点验证
+```bash
+# 运行扩展性测试
+python examples/custom_rules.py
+python examples/dynamic_config.py
+```
+
+#### 3. 性能验证
+```bash
+# 验证百万级吞吐量
+python bench_async.py --events 1000000 --duration 10
+
+# 验证微秒级延迟
+python bench_async.py --latency-test
+```
+
 ## 核心特性
 
 - **高并发**: 支持百万级/秒事件处理
@@ -27,22 +68,26 @@ risk_engine/
 └── accel/                 # 加速模块
 ```
 
-## 风控规则
+## 风控规则详解
 
 ### 1. 单账户成交量限制
-- 监控账户在指定时间窗口内的成交量
-- 支持多维度统计（账户、合约、产品、交易所、账户组）
-- 超过阈值时触发风控动作
+- **规则**: 监控账户在指定时间窗口内的成交量
+- **支持指标**: 成交量、成交金额、报单量、撤单量
+- **统计维度**: 账户、合约、产品、交易所、账户组任意组合
+- **触发条件**: 超过阈值时触发风控动作
+- **扩展点**: 支持自定义指标计算逻辑
 
 ### 2. 报单频率控制
-- 监控账户在滑动时间窗口内的报单频率
-- 支持动态阈值和时间窗口调整
-- 超过阈值时暂停报单，回落后自动恢复
+- **规则**: 监控账户在滑动时间窗口内的报单频率
+- **时间窗口**: 支持秒级和纳秒级配置
+- **动态调整**: 支持运行时阈值和时间窗口调整
+- **自动恢复**: 超过阈值时暂停报单，回落后自动恢复
+- **扩展点**: 支持账户、合约、产品维度控制
 
 ### 3. 扩展规则支持
-- 基于 `Rule` 基类的可扩展规则框架
-- 支持自定义风控逻辑
-- 插件化架构设计
+- **基类设计**: 基于 `Rule` 基类的可扩展规则框架
+- **自定义逻辑**: 支持自定义风控逻辑和触发条件
+- **插件化架构**: 规则可独立开发和部署
 
 ## 快速开始
 
@@ -230,6 +275,51 @@ class CustomRiskRule(Rule):
 # engine.add_rule(CustomRiskRule("CUSTOM-RULE", 1000))
 ```
 
+## 扩展点详解
+
+### 1. 新增统计维度
+```python
+# 在 dimensions.py 中添加新维度
+class NewDimension(str, Enum):
+    CUSTOM_FIELD = "custom_field"
+
+# 在 make_dimension_key 函数中支持新维度
+def make_dimension_key(
+    account_id: Optional[str] = None,
+    contract_id: Optional[str] = None,
+    product_id: Optional[str] = None,
+    exchange_id: Optional[str] = None,
+    account_group_id: Optional[str] = None,
+    custom_field: Optional[str] = None,  # 新增维度
+) -> Tuple[str, ...]:
+    # 实现逻辑
+    pass
+```
+
+### 2. 新增指标类型
+```python
+# 在 metrics.py 中添加新指标
+class MetricType(str, Enum):
+    # 现有指标
+    TRADE_VOLUME = "trade_volume"
+    TRADE_NOTIONAL = "trade_notional"
+    ORDER_COUNT = "order_count"
+    
+    # 新增指标
+    CUSTOM_METRIC = "custom_metric"
+```
+
+### 3. 新增处置动作
+```python
+# 在 actions.py 中添加新动作
+class Action(Enum):
+    # 现有动作
+    SUSPEND_ACCOUNT_TRADING = auto()
+    
+    # 新增动作
+    CUSTOM_ACTION = auto()
+```
+
 ## 监控和统计
 
 ```python
@@ -257,6 +347,24 @@ print(f"平均延迟: {stats['avg_latency_ns']/1000:.2f} 微秒")
 - **单机限制**: 当前设计为单机部署，如需更高性能需考虑分布式
 - **内存依赖**: 高并发场景下内存使用量较大
 - **规则复杂度**: 复杂规则可能影响性能
+
+## 验证清单
+
+### 功能验证
+- [ ] 单账户成交量限制规则正常工作
+- [ ] 报单频率控制规则正常工作
+- [ ] Action系统正确生成处置指令
+- [ ] 多维度统计正确聚合数据
+
+### 性能验证
+- [ ] 吞吐量达到百万级/秒
+- [ ] 延迟控制在微秒级
+- [ ] 高并发场景下系统稳定
+
+### 扩展性验证
+- [ ] 新增统计维度不影响现有功能
+- [ ] 自定义规则能正确集成
+- [ ] 配置热更新正常工作
 
 ## 目录与代码
 
