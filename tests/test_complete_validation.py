@@ -3,7 +3,6 @@
 测试所有需求功能和扩展点
 """
 
-import pytest
 import time
 from typing import List
 from risk_engine import RiskEngine
