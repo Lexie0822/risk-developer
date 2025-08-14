@@ -28,10 +28,25 @@ class VolumeLimitRuleConfig:
 
 @dataclass
 class OrderRateLimitRuleConfig:
-    """报单频率限制规则配置。"""
+    """报单频率限制规则配置。
+
+    参数说明：
+    - ``threshold``   : 触发风控的报单次数阈值
+    - ``window_ns``   : 统计窗口大小（纳秒）。1 秒 = 1_000_000_000 纳秒。
+
+    兼容性：旧代码可能仍然使用 ``window_seconds`` 字段。为避免破坏兼容性，
+    这里提供 ``window_seconds`` 只读属性，将 ``window_ns`` 自动转换为秒。
+    """
+
     threshold: int
-    window_seconds: int = 1
+    window_ns: int = 1_000_000_000  # 默认 1 秒窗口
     dimension: StatsDimension = StatsDimension.ACCOUNT
+
+    # --- 兼容旧接口 --------------------------------------------------------
+    @property
+    def window_seconds(self) -> int:
+        """返回窗口大小（秒）。只读属性，用于向后兼容。"""
+        return max(1, self.window_ns // 1_000_000_000)
 
 
 @dataclass
